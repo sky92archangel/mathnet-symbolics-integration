@@ -1,4 +1,4 @@
-﻿using MathNet.Symbolics.Integration.Core;
+using MathNet.Symbolics.Integration.Core;
 
 namespace MathNet.Symbolics.Integration;
 
@@ -12,7 +12,7 @@ public static class Integrate
     {
         var solver = new IntegrationSolver();
         var rule = solver.Solve(integrand, variable);
-        return rule.Eval();
+        return Operators.Simplify(rule.Eval());
     }
 
     /// <summary>Returns the integration steps (rule tree) for inspection.</summary>

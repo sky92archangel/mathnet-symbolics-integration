@@ -1,17 +1,9 @@
-# Math.NET Symbolics Integration
+# MathNet Symbolics Integration
 
-**纯 C# 符号积分引擎**，移植自 [SymPy](https://github.com/sympy/sympy) 的 `manualintegrate` 模块。
-零外部依赖，基于 C# 12 record 类型实现完整的表达式树。
+A pure C# symbolic integration library — a port of SymPy's `manualintegrate` module.  
+**Zero NuGet dependencies** — only `System.Numerics.BigInteger` + custom `Rational` struct.
 
----
-
-## 快速开始
-
-```xml
-<ItemGroup>
-  <ProjectReference Include="..\mathnet-symbolics-integration\src\Symbolics.Integration\Symbolics.Integration.csproj" />
-</ItemGroup>
-```
+## Quick Start
 
 ```csharp
 using MathNet.Symbolics.Integration;
@@ -19,171 +11,122 @@ using static MathNet.Symbolics.Integration.Core.Operators;
 
 var x = Symbol("x");
 
-// ∫ (x² + 2x + 1) dx
-var result = Integrate.Of(x*x + 2*x + 1, x);
-// ∫ sin(x) dx = -cos(x)
-var result2 = Integrate.Of(Sin(x), x);
+// Atomic rules
+Integrate.Of(Sin(x), x);           // -cos(x)
+Integrate.Of(Exp(x), x);           // e^x
+Integrate.Of(1 / x, x);             // ln(x)
+Integrate.Of(Tan(x), x);            // -ln|cos(x)|
+
+// Strategy: u-substitution
+Integrate.Of(3*x*Exp(x*x), x);      // 3/2·e^(x²)
+
+// Strategy: integration by parts (LIATE)
+Integrate.Of(x*Cos(x), x);          // x·sin(x) + cos(x)
+Integrate.Of(x*Exp(x), x);          // x·e^x - e^x
+
+// Linear arguments
+Integrate.Of(Sin(2*x), x);          // -1/2·cos(2x)
+Integrate.Of(Exp(3*x), x);          // 1/3·e^(3x)
+
+// Quadratic sqrt forms
+Integrate.Of(1 / Sqrt(1 + x*x), x); // asinh(x)
+Integrate.Of(1 / Sqrt(1 - x*x), x); // asin(x)
+Integrate.Of(1 / (1 + x*x), x);     // atan(x)
+
+// General quadratic sqrt: ∫ 1/√(ax²+bx+c) dx
+Integrate.Of(1 / Sqrt(x*x + 2*x + 2), x);
+// ln(2 + 2x + 2√(2+2x+x²))
+
+// ∫ √(ax²+bx+c) dx
+Integrate.Of(Sqrt(x*x + 1), x);
+// (x/2)·√(1+x²) + 1/2·ln(2x+2√(1+x²))
+
+// Special functions
+Integrate.Of(Exp(-x*x), x);         // √π/2·erf(x)
+Integrate.Of(Sin(x) / x, x);        // Si(x)
+Integrate.Of(Cos(x) / x, x);        // Ci(x)
+Integrate.Of(Exp(x) / x, x);        // Ei(x)
+Integrate.Of(Sin(x*x), x);          // Fresnel integral
+Integrate.Of(1 / Ln(x), x);         // Li(x)
+Integrate.Of(x*x * Exp(x), x);      // Upper incomplete gamma Γ(3,-x)
+Integrate.Of(Exp(-x*x) * Erf(2*x), x); // Owens T function
+// Polylog: Li(b, a·x) / x → Li(b+1, a·x)
+var poly = FunctionN(Polylog, [One, 2*x]) / x;
+Integrate.Of(poly, x);
+// Elliptic integrals:
+var sinSq = Power(Sin(x), 2);
+Integrate.Of(1 / Sqrt(2 - sinSq), x);  // F(x, ½)/√2
+Integrate.Of(Sqrt(2 - sinSq), x);      // E(x, ½)·√2
+
+// Rational functions
+Integrate.Of(1 / (x-1), x);         // ln|x-1|
+Integrate.Of(1 / ((x-1)*(x-2)), x); // partial fractions
+
+// Orthogonal polynomials
+var Pn = new FunctionN(FunctionNType.LegendreP, new[] { Symbol("n"), x });
+Integrate.Of(Pn, x);                // (P_{n+1}-P_{n-1})/(2n+1)
+
+// Step-by-step
+IntegrationRule steps = Integrate.Steps(x*Cos(x), x);
+// Returns: PartsRule(U=x, Dv=cos(x), VStep=SinRule, SecondStep=PowerRule)
 ```
 
----
+## Supported Rules
 
-## 用法指南
-
-### 运算符重载（推荐）
-
-**支持 `+` `-` `*` `/`，写起来和普通数学表达式一样自然：**
-
-```csharp
-var x = Symbol("x");
-
-// ∫ x² + 2x + 1 dx
-Integrate.Of(x*x + 2*x + 1, x);
-
-// ∫ 3·sin(x) dx
-Integrate.Of(3 * Sin(x), x);
-
-// ∫ (x + sin(x)) dx
-Integrate.Of(x + Sin(x), x);
-
-// ∫ (1 + x)² dx
-Integrate.Of((1 + x) * (1 + x), x);
-```
-
-### 基本积分
-
-```csharp
-Integrate.Of(5, x);         // ∫ 5 dx → 5x
-Integrate.Of(x, x);         // ∫ x dx → x²/2
-Integrate.Of(1 / x, x);     // ∫ 1/x dx → ln(x)
-Integrate.Of(Exp(x), x);    // ∫ eˣ dx → eˣ
-Integrate.Of(Sin(x), x);    // ∫ sin(x) dx → -cos(x)
-Integrate.Of(Cos(x), x);    // ∫ cos(x) dx → sin(x)
-Integrate.Of(Sinh(x), x);   // ∫ sinh(x) dx → cosh(x)
-Integrate.Of(Cosh(x), x);   // ∫ cosh(x) dx → sinh(x)
-```
-
-### 查看积分步骤
-
-```csharp
-var steps = Integrate.Steps(Sin(x), x);
-
-if (steps is SinRule)
-    Console.WriteLine("使用了正弦规则");
-
-// 延迟求值
-var result = steps.Eval();
-
-// 检查是否积不出来
-if (steps.ContainsDontKnow)
-    Console.WriteLine("暂不支持此积分");
-```
-
----
-
-## 表达式构造 API
-
-### 数值
-
-```csharp
-42;             // int → 自动转为 Expression.Number
-3.14;           // double → 自动转为 Expression.Approximation
-```
-
-### 符号与常数
-
-```csharp
-Symbol("x");          // 变量
-E;                    // 自然常数 e
-Pi;                   // 圆周率 π
-I;                    // 虚数单位 i
-```
-
-### 算术运算
-
-支持运算符重载，也可以用函数式 API：
-
-| 运算符 | 函数式写法 | 说明 |
-|---|---|---|
-| `a + b` | `Add(a, b)` | 加 |
-| `a - b` | `Subtract(a, b)` | 减 |
-| `a * b` | `Multiply(a, b)` | 乘 |
-| `a / b` | `Divide(a, b)` | 除 |
-| `-a` | `Negate(a)` | 取反 |
-| `Pow(a, b)` | `Pow(a, b)` | 次方 |
-
-### 函数
-
-```csharp
-Sin(x);  Cos(x);  Tan(x);      // 三角函数
-Sinh(x); Cosh(x); Tanh(x);     // 双曲函数
-Exp(x);  Ln(x);   Lg(x);       // 指数/对数
-Asin(x); Acos(x); Atan(x);     // 反三角函数
-Abs(x);  Sqrt(x);              // 绝对值/平方根
-Log(b, x);                     // 任意底数对数
-```
-
-### 表达式类型检查
-
-```csharp
-Expression.IsNumber(expr);      // 是否数字
-Expression.IsSymbol(expr);      // 是否变量
-Expression.IsPower(expr);       // 是否次方
-Expression.IsFunction(expr);    // 是否函数
-Expression.IsSum(expr);         // 是否求和
-Expression.IsProduct(expr);     // 是否乘积
-```
-
----
-
-## 已实现的积分规则
-
-| 规则 | 示例 |
+| Category | Rules |
 |---|---|
-| **ConstantRule** | `∫ 5 dx = 5x` |
-| **PowerRule** | `∫ x² dx = x³/3` |
-| **ReciprocalRule** | `∫ 1/x dx = ln(x)` |
-| **ExpRule** | `∫ eˣ dx = eˣ` |
-| **SinRule** | `∫ sin(x) dx = -cos(x)` |
-| **CosRule** | `∫ cos(x) dx = sin(x)` |
-| **SinhRule** | `∫ sinh(x) dx = cosh(x)` |
-| **CoshRule** | `∫ cosh(x) dx = sinh(x)` |
-| **AddRule** | `∫ (f+g) = ∫f + ∫g` |
-| **ConstantTimesRule** | `∫ a·f = a·∫f` |
-| **URule** | 换元积分 |
-| **PartsRule** | 分部积分 |
-| **DontKnowRule** | 无法积分时返回占位符 |
+| **Basic** | Constant, Power, Reciprocal, Exp |
+| **Trigonometric** | sin, cos, tan, cot, sec, csc |
+| **Hyperbolic** | sinh, cosh, tanh, coth, sech, csch |
+| **Inverse trig** | asin, acos, atan |
+| **Inverse hyp** | asinh, acosh, atanh |
+| **Strategy** | Sum, Constant×, u-substitution, Parts, CyclicParts |
+| **Linear args** | `f(ax+b)` automatic detection |
+| **Quadratic sqrt** | `1/√(ax²+bx+c)`, `√(ax²+bx+c)`, `1/(a+bx²)` |
+| **Special funcs** | Erf, FresnelS/C, Si, Ci, Shi, Chi, Ei, Li, **Polylog**, **UpperGamma** |
+| **Elliptic** | **EllipticF** (1st kind), **EllipticE** (2nd kind) |
+| **Owens T** | **OwensT** `exp(-(ax+b)²)·erf(y·(ax+b))` |
+| **Orthogonal poly** | LegendreP, ChebyshevT/U, HermiteH, LaguerreL, GegenbauerC, JacobiP, AssocLaguerreL |
+| **Rational** | `1/(x-a)^k`, `1/(ax+b)`, partial fractions |
 
----
+## API
 
-## 项目结构
+```csharp
+// Compute indefinite integral
+Expression Integrate.Of(Expression integrand, Expression variable);
+
+// Get rule tree for inspection
+IntegrationRule Integrate.Steps(Expression integrand, Expression variable);
+
+// Rule eval
+Expression rule.Eval();
+
+// Simplify expression tree
+Expression Operators.Simplify(Expression expr);
+```
+
+## Project Structure
 
 ```
 src/
-├── Symbolics.Integration/           # 主库
-│   ├── Core/
-│   │   ├── Symbol.cs                # 变量/符号
-│   │   ├── Rational.cs              # 有理数 (替代 F# BigRational)
-│   │   ├── Expression.cs            # 表达式基类 + 12 种子类 + 运算符重载
-│   │   ├── FunctionType.cs          # 函数/常数/无穷 枚举
-│   │   ├── Operators.cs             # 算术/函数构造器 + 归一化
-│   │   ├── Structure.cs             # 树遍历/代换
-│   │   └── Algebraic.cs             # 代数分解
-│   ├── IntegralInfo.cs
-│   ├── IntegrationRule.cs           # 13 种积分规则
-│   ├── IntegrationSolver.cs         # 规则分发引擎
-│   └── Integrate.cs                 # 入口: Integrate.Of()
-└── Symbolics.Integration.Tests/
-    └── Program.cs                   # 测试用例
+  Symbolics.Integration/
+    Integrate.cs              — Entry point (Of / Steps)
+    IntegrationRule.cs        — Rule hierarchy (~35 rule classes)
+    IntegrationSolver.cs      — Recursive solver with strategy ordering
+    Core/
+      Expression.cs           — Symbolic expression types + ToString
+      Operators.cs            — Arithmetic + Simplify
+      FunctionType.cs         — Function enums
+      Rational.cs             — Exact rational arithmetic
+      Structure.cs            — Tree traversal utilities
+      Algebraic.cs            — Summand/Factor decomposition
+  Symbolics.Integration.Tests/
+    Program.cs                — 63 integration tests
 ```
 
-## 运行测试
+## Build
 
 ```bash
+dotnet build src/Symbolics.Integration
 dotnet run --project src/Symbolics.Integration.Tests
 ```
-
----
-
-## 许可证
-
-MIT

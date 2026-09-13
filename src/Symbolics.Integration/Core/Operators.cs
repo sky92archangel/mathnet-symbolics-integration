@@ -56,7 +56,14 @@ public static class Operators
 
         var result = BuildSumOrTerm(terms);
         if (constSum.HasValue && constSum.Value != Rational.Zero)
-            result = BuildSumOrTerm(new[] { new Expression.Number(constSum.Value), result! });
+        {
+            var constExpr = new Expression.Number(constSum.Value);
+            if (result is Expression.Sum existingSum)
+                result = new Expression.Sum(
+                    new[] { constExpr }.Concat(existingSum.Terms).ToList());
+            else
+                result = BuildSumOrTerm(new[] { constExpr, result! });
+        }
         return result!;
     }
 
@@ -101,6 +108,9 @@ public static class Operators
         }
 
         if (constMul.HasValue && constMul.Value.IsZero) return Zero;
+
+        // Combine like factors: x*x → x^2, x^2*x → x^3
+        factors = CombineLikeFactors(factors);
 
         var result = BuildProductOrTerm(factors);
         if (constMul.HasValue && constMul.Value != Rational.One)
@@ -200,6 +210,70 @@ public static class Operators
     private static IEnumerable<Expression> FlattenProductFactors(Expression e) =>
         e is Expression.Product p ? p.Factors.SelectMany(FlattenProductFactors) : new[] { e };
 
+    /// <summary>Combine like factors: [x, x] → [x^2], [x, x^2] → [x^3].</summary>
+    private static List<Expression> CombineLikeFactors(List<Expression> factors)
+    {
+        if (factors.Count <= 1) return factors;
+
+        var groups = new Dictionary<Expression, int>();
+        var others = new List<Expression>();
+
+        foreach (var f in factors)
+        {
+            if (f is Expression.Power pw && !(pw.Base is Expression.Number))
+            {
+                // Already a power: try to combine base
+                if (pw.Exponent is Expression.Number expN && expN.Value.IsInteger)
+                {
+                    if (groups.ContainsKey(pw.Base))
+                        groups[pw.Base] += expN.Value.ToInt32();
+                    else
+                    {
+                        // We'll look up non-power forms too
+                        groups[pw.Base] = expN.Value.ToInt32();
+                        // Remove from others if the plain form exists
+                    }
+                    continue;
+                }
+            }
+            if (!(f is Expression.Number) && !(f is Expression.Constant))
+            {
+                if (groups.ContainsKey(f))
+                    groups[f] += 1;
+                else
+                    groups[f] = 1;
+                continue;
+            }
+            others.Add(f);
+        }
+
+        var result = new List<Expression>();
+        Rational? numProduct = null;
+        foreach (var kv in groups)
+        {
+            if (kv.Value == 1)
+                result.Add(kv.Key);
+            else if (kv.Value > 1)
+                result.Add(new Expression.Power(kv.Key, Expression.Int32(kv.Value)));
+            else if (kv.Value < 0)
+                result.Add(new Expression.Power(kv.Key, Expression.Int32(kv.Value)));
+            // value == 0 means x^0 = 1, skip
+        }
+        // Multiply all numeric factors together
+        foreach (var f in others)
+        {
+            if (f is Expression.Number n)
+                numProduct = (numProduct ?? Rational.One) * n.Value;
+            else
+                result.Add(f);
+        }
+        if (numProduct.HasValue && !numProduct.Value.IsOne)
+            result.Insert(0, new Expression.Number(numProduct.Value));
+        else if (numProduct.HasValue && numProduct.Value.IsOne && result.Count == 0)
+            result.Add(One);
+        return result;
+    }
+
     private static Expression? BuildSumOrTerm(IReadOnlyList<Expression> terms) => terms.Count switch
     {
         0 => null,
@@ -213,4 +287,115 @@ public static class Operators
         1 => factors[0],
         _ => new Expression.Product(factors)
     };
+
+    // ── Simplification ─────────────────────────
+
+    /// <summary>Simplify an expression tree (flatten, combine constants, cancel identities).</summary>
+    public static Expression Simplify(Expression expr)
+    {
+        // 1. Recursively simplify children
+        var s = expr switch
+        {
+            Expression.Sum sum => SimplifySum(sum),
+            Expression.Product prod => SimplifyProduct(prod),
+            Expression.Power pw => SimplifyPower(Simplify(pw.Base), Simplify(pw.Exponent)),
+            Expression.Function fn => new Expression.Function(fn.Op, Simplify(fn.Argument)),
+            Expression.FunctionN fnn => new Expression.FunctionN(fnn.Op,
+                fnn.Arguments.Select(Simplify).ToList()),
+            _ => expr
+        };
+        return s;
+    }
+
+    private static Expression SimplifySum(Expression.Sum sum)
+    {
+        var simplified = sum.Terms.Select(Simplify).ToList();
+        // Flatten nested sums + collect constants
+        var terms = new List<Expression>();
+        Rational? constSum = null;
+        foreach (var t in simplified)
+        {
+            if (t is Expression.Sum nested)
+                terms.AddRange(nested.Terms);
+            else if (t is Expression.Number n)
+                constSum = (constSum ?? Rational.Zero) + n.Value;
+            else if (!Expression.IsZero(t))
+                terms.Add(t);
+        }
+        if (constSum.HasValue && constSum.Value != Rational.Zero)
+            terms.Insert(0, new Expression.Number(constSum.Value));
+
+        return terms.Count switch
+        {
+            0 => Zero,
+            1 => terms[0],
+            _ => new Expression.Sum(terms)
+        };
+    }
+
+    private static Expression SimplifyProduct(Expression.Product prod)
+    {
+        var simplified = prod.Factors.Select(Simplify).ToList();
+        // Collect numeric factors, flatten nested products
+        var factors = new List<Expression>();
+        Rational? numProduct = null;
+        int sign = 1;
+        foreach (var f in simplified)
+        {
+            if (f is Expression.Product nested)
+                factors.AddRange(nested.Factors);
+            else if (f is Expression.Number n)
+            {
+                if (n.Value.IsMinusOne)
+                    sign *= -1;
+                else if (n.Value.IsZero)
+                    return Zero;
+                else
+                    numProduct = (numProduct ?? Rational.One) * n.Value;
+            }
+            else if (f is Expression.Power pw && pw.Exponent is Expression.Number pe && pe.Value.IsMinusOne
+                     && pw.Base is Expression.Number bn)
+            {
+                // Numeric reciprocal: 2^(-1) → 1/2 as a rational
+                numProduct = (numProduct ?? Rational.One) * Rational.Pow(bn.Value, -1);
+            }
+            else if (!Expression.IsOne(f))
+                factors.Add(f);
+        }
+
+        // Apply sign
+        if (sign < 0)
+        {
+            if (numProduct.HasValue)
+                numProduct = -numProduct.Value;
+            else
+                numProduct = Rational.MinusOne;
+        }
+
+        // Combine numeric factors
+        if (numProduct.HasValue && !numProduct.Value.IsOne)
+        {
+            if (numProduct.Value.IsZero) return Zero;
+            factors.Insert(0, new Expression.Number(numProduct.Value));
+        }
+        // Remove leading 1 if no numeric factor and sign=+1
+        // (factors already had ones removed above)
+
+        return factors.Count switch
+        {
+            0 => One,
+            1 => factors[0],
+            _ => new Expression.Product(factors)
+        };
+    }
+
+    private static Expression SimplifyPower(Expression b, Expression e)
+    {
+        if (Expression.IsZero(e)) return One;
+        if (Expression.IsOne(e)) return b;
+        if (Expression.IsZero(b)) return Zero;
+        if (Expression.IsOne(b)) return One;
+        // x^(-1) → 1/x form is already handled elsewhere
+        return new Expression.Power(b, e);
+    }
 }

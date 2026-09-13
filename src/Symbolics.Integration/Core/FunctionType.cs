@@ -9,6 +9,11 @@ public enum FunctionType
     Sinh, Cosh, Tanh, Csch, Sech, Coth,
     Asin, Acos, Atan, Acsc, Asec, Acot,
     Asinh, Acosh, Atanh, Acsch, Asech, Acoth,
+    // Special functions
+    Erf, Erfc, Erfi,
+    FresnelC, FresnelS,
+    Si, Ci, Shi, Chi,
+    Ei, Li,
     AiryAi, AiryAiPrime,
     AiryBi, AiryBiPrime,
 }
@@ -18,6 +23,16 @@ public enum FunctionNType
 {
     Log,
     Atan2,
+    // Orthogonal polynomials: args = [degree, x]
+    LegendreP, ChebyshevT, ChebyshevU,
+    HermiteH, LaguerreL, GegenbauerC, JacobiP,
+    AssocLaguerreL,  // args = [degree, k, x]
+    // Special functions
+    OwensT,          // args = [u, y]
+    Polylog,         // args = [s, z]
+    UpperGamma,      // args = [s, z]
+    EllipticF,       // args = [phi, m]
+    EllipticE,       // args = [phi, m]
     BesselJ, BesselY,
     BesselI, BesselK,
     BesselIRatio, BesselKRatio,
