@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Symbolics.Integration.Tests/Symbolics.Integration.Tests.csproj" />
+    <Project Path="src/Symbolics.Integration/Symbolics.Integration.csproj" />
+  </Folder>
+</Solution>
