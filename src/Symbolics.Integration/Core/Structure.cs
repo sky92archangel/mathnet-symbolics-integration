@@ -1,9 +1,15 @@
 namespace MathNet.Symbolics.Integration.Core;
 
-/// <summary>Tree traversal, substitution, and inspection utilities.</summary>
+/// <summary>
+/// (EN) Tree traversal, substitution, and inspection utilities.
+/// (ZH) 表达式树的遍历、替换与检查工具。
+/// </summary>
 public static class Structure
 {
-    /// <summary>Does the expression contain the given variable?</summary>
+    /// <summary>
+    /// (EN) Does the expression contain the given variable?
+    /// (ZH) 表达式是否包含指定的变量？
+    /// </summary>
     public static bool ContainsVariable(Expression expr, Expression variable)
     {
         if (expr.Equals(variable)) return true;
@@ -24,7 +30,10 @@ public static class Structure
         };
     }
 
-    /// <summary>Recursively substitute 'from' with 'to' in the expression.</summary>
+    /// <summary>
+    /// (EN) Recursively substitute 'from' with 'to' in the expression.
+    /// (ZH) 在表达式中递归地将 'from' 替换为 'to'。
+    /// </summary>
     public static Expression Substitute(Expression from, Expression to, Expression expr)
     {
         if (expr.Equals(from)) return to;
@@ -45,7 +54,10 @@ public static class Structure
         };
     }
 
-    /// <summary>Recursively apply a transformation to every node in the expression tree.</summary>
+    /// <summary>
+    /// (EN) Recursively apply a transformation to every node in the expression tree.
+    /// (ZH) 对表达式树中的每个节点递归应用变换函数。
+    /// </summary>
     public static Expression Map(Func<Expression, Expression> f, Expression expr)
     {
         var mapped = expr switch
@@ -65,7 +77,10 @@ public static class Structure
         return f(mapped);
     }
 
-    /// <summary>Collect all distinct sub-expressions matching a predicate.</summary>
+    /// <summary>
+    /// (EN) Collect all distinct sub-expressions matching a predicate.
+    /// (ZH) 收集所有满足谓词条件的互异子表达式。
+    /// </summary>
     public static HashSet<Expression> CollectAll(Expression expr,
         Func<Expression, bool> predicate)
     {
@@ -74,6 +89,10 @@ public static class Structure
         return results;
     }
 
+    /// <summary>
+    /// (EN) Internal recursive implementation of <see cref="CollectAll"/>.
+    /// (ZH) <see cref="CollectAll"/> 的内部递归实现。
+    /// </summary>
     private static void CollectAllImpl(Expression expr,
         Func<Expression, bool> predicate, HashSet<Expression> results)
     {
@@ -101,7 +120,10 @@ public static class Structure
         }
     }
 
-    /// <summary>Count the "complexity" of an expression (operators count).</summary>
+    /// <summary>
+    /// (EN) Count the "complexity" of an expression (number of operator nodes).
+    /// (ZH) 计算表达式的"复杂度"（运算符节点的数量）。
+    /// </summary>
     public static int CountOperators(Expression expr) => expr switch
     {
         Expression.Number _ or Expression.SymbolExpr _

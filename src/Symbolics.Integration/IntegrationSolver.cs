@@ -3,76 +3,173 @@ using static MathNet.Symbolics.Integration.Core.Operators;
 
 namespace MathNet.Symbolics.Integration;
 
+/// <summary>
+/// (EN) Core symbolic integration engine.  Applies a sequence of strategies
+///      (atomic rules, sum splitting, constant extraction, u-substitution,
+///      rational-function decomposition, integration by parts) to find an
+///      antiderivative for a given integrand and variable.
+/// (ZH) 符号积分核心引擎。按顺序尝试多种策略（原子规则、求和拆分、常数提取、
+///      换元积分、有理函数分解、分部积分）来寻找给定被积表达式关于指定变量的原函数。
+/// </summary>
 internal class IntegrationSolver
 {
+    /// <summary>
+    /// (EN) Upper bound on the operator-node count of an integrand the solver will attempt. Large
+    ///      expressions are produced by intermediate rewrite/parts steps; refusing them keeps the
+    ///      search from suffering exponential expression blow-up.
+    /// (ZH) 求解器愿意尝试的被积表达式算符节点数上限。中间的重写/分部积分步骤会产生巨大的表达式；
+    ///      拒绝它们可避免搜索遭受表达式规模的指数级膨胀。
+    /// </summary>
+    private const int MaxIntegrandNodes = 1200;
+
     private readonly int _maxDepth;
     private int _depth;
 
+    /// <summary>
+    /// (EN) Remaining work budget: every recursion consumes one unit, forcing termination even when
+    ///      the strategy search branches heavily on integrals it cannot solve.
+    /// (ZH) 剩余工作预算：每次递归消耗一个单位，即使策略搜索在无法求解的积分上大量分支也能保证终止。
+    /// </summary>
+    private int _budget = 20_000;
+
+    /// <summary>
+    /// (EN) True when the current subtree bottomed out on the depth or budget guard. Results computed
+    ///      while starved may be artifacts of the limit instead of genuine failures, so they are not
+    ///      memoized; any result whose subtree never starved is cached (success or failure alike).
+    /// (ZH) 当前子树是否触发了深度或预算上限。处于上限状态时得到的结果可能只是受限制的产物而非真正的
+    ///      失败，因此不记忆；凡是子树从未触发上限的结果（无论成功或失败）都会被缓存。
+    /// </summary>
+    private bool _starved;
+
+    /// <summary>
+    /// (EN) Memoized successful sub-results, keyed by (integrand, variable), so that the same
+    ///      subintegral reached along different search paths is solved only once.
+    /// (ZH) 按 (被积式, 变量) 记忆已成功求解的子结果，使不同搜索路径到达的同一子积分只求解一次。
+    /// </summary>
+    private readonly Dictionary<(Expression, Expression), IntegrationRule> _cache = new();
+
+    /// <summary>
+    /// (EN) Subproblems on the current recursion path; reaching one again means a cycle and is
+    ///      reported as unsolvable, which breaks integrals that reappear under integration by parts.
+    /// (ZH) 当前递归路径上的子问题；再次到达即构成环，报告为不可解，从而打破分部积分中重现的积分。
+    /// </summary>
+    private readonly HashSet<(Expression, Expression)> _active = new();
+
+    /// <summary>
+    /// (EN) Creates the solver with a configurable recursion depth limit.
+    /// (ZH) 创建求解器，可配置递归深度上限。
+    /// </summary>
+    /// <param name="maxDepth">(EN) Maximum recursion depth before giving up. (ZH) 放弃前的最大递归深度。</param>
     public IntegrationSolver(int maxDepth = 12)
     {
         _maxDepth = maxDepth;
     }
 
+    /// <summary>
+    /// (EN) Find the antiderivative of <paramref name="integrand"/> with respect to
+    ///      <paramref name="variable"/>, returning a rule tree that can be evaluated. Successful
+    ///      results are memoized; cyclic subproblems and budget exhaustion yield a DontKnowRule.
+    /// (ZH) 求 <paramref name="integrand"/> 关于 <paramref name="variable"/> 的原函数，返回可求值的
+    ///      规则树。成功结果会被记忆；子问题成环或预算耗尽则返回 DontKnowRule。
+    /// </summary>
     public IntegrationRule Solve(Expression integrand, Expression variable)
     {
-        if (_depth >= _maxDepth)
+        var key = (integrand, variable);
+        if (_cache.TryGetValue(key, out var cached)) return cached;
+        if (_active.Contains(key))
             return new DontKnowRule { Integrand = integrand, Variable = variable };
-        _depth++;
+        // (EN) Refuse pathologically large integrands (artifacts of earlier steps). (ZH) 拒绝异常庞大的被积式（早期步骤的产物）。
+        if (Structure.CountOperators(integrand) > MaxIntegrandNodes)
+            return new DontKnowRule { Integrand = integrand, Variable = variable };
+        if (_depth >= _maxDepth || _budget <= 0)
+        {
+            _starved = true;
+            return new DontKnowRule { Integrand = integrand, Variable = variable };
+        }
 
+        _budget--;
+        _depth++;
+        _active.Add(key);
+        // (EN) Track starvation for this subtree independently of any ancestor. (ZH) 独立跟踪本子树的受限状态，不受祖先影响。
+        var outerStarved = _starved;
+        _starved = false;
+        IntegrationRule result;
         try
         {
-            // 1. Atomic rules (direct function matching)
-            var rule = MatchAtomicRules(integrand, variable);
-            if (rule is not null && !rule.ContainsDontKnow) return rule;
-
-            // 2. Sum rule: ∫(f+g) = ∫f + ∫g
-            rule = MatchSumRule(integrand, variable);
-            if (rule is not null && !rule.ContainsDontKnow) return rule;
-
-            // 3. Constant extraction: ∫ a*f(x) = a*∫f
-            rule = MatchConstantTimesRule(integrand, variable);
-            if (rule is not null && !rule.ContainsDontKnow) return rule;
-
-            // 4. Substitution (u-sub): f(g(x))*g'(x)
-            rule = TrySubstitutionRule(integrand, variable);
-            if (rule is not null && !rule.ContainsDontKnow) return rule;
-
-            // 5. Rational function integration
-            rule = TryRationalRule(integrand, variable);
-            if (rule is not null && !rule.ContainsDontKnow) return rule;
-
-            // 6. Integration by parts (LIATE)
-            rule = TryPartsRule(integrand, variable);
-            if (rule is not null && !rule.ContainsDontKnow) return rule;
-
-            // 7. Fall back
-            return rule ?? new DontKnowRule { Integrand = integrand, Variable = variable };
+            result = SolveCore(integrand, variable);
         }
         finally
         {
+            _active.Remove(key);
             _depth--;
         }
+        var starvedHere = _starved;
+        _starved = outerStarved || starvedHere;
+        // (EN) Only a result whose own subtree never starved is budget-independent and safe to reuse.
+        // (ZH) 只有自身子树从未触发上限的结果才与预算无关，可安全复用。
+        if (!starvedHere) _cache[key] = result;
+        return result;
     }
 
+    /// <summary>
+    /// (EN) Applies the strategy chain to a subproblem; split out from <see cref="Solve"/> so that
+    ///      memoization, cycle detection and the depth/budget guards wrap every attempt.
+    /// (ZH) 对子问题应用策略链；从 <see cref="Solve"/> 中拆出，使记忆化、环检测与深度/预算守卫能包裹
+    ///      每一次尝试。
+    /// </summary>
+    private IntegrationRule SolveCore(Expression integrand, Expression variable)
+    {
+        // (EN) 1. Atomic rules (direct function matching). (ZH) 1. 原子规则（直接函数匹配）。
+        var rule = MatchAtomicRules(integrand, variable);
+        if (rule is not null && !rule.ContainsDontKnow) return rule;
+
+        // (EN) 2. Sum rule: ∫(f+g) = ∫f + ∫g. (ZH) 2. 求和规则：∫(f+g) = ∫f + ∫g。
+        rule = MatchSumRule(integrand, variable);
+        if (rule is not null && !rule.ContainsDontKnow) return rule;
+
+        // (EN) 3. Constant extraction: ∫ a*f(x) = a*∫f. (ZH) 3. 常数提取：∫ a*f(x) = a*∫f。
+        rule = MatchConstantTimesRule(integrand, variable);
+        if (rule is not null && !rule.ContainsDontKnow) return rule;
+
+        // (EN) 4. Substitution (u-sub): f(g(x))*g'(x). (ZH) 4. 换元积分：f(g(x))*g'(x)。
+        rule = TrySubstitutionRule(integrand, variable);
+        if (rule is not null && !rule.ContainsDontKnow) return rule;
+
+        // (EN) 5. Rational function integration. (ZH) 5. 有理函数积分。
+        rule = TryRationalRule(integrand, variable);
+        if (rule is not null && !rule.ContainsDontKnow) return rule;
+
+        // (EN) 6. Integration by parts (LIATE). (ZH) 6. 分部积分（LIATE）。
+        rule = TryPartsRule(integrand, variable);
+        if (rule is not null && !rule.ContainsDontKnow) return rule;
+
+        // (EN) 7. Fall back. (ZH) 7. 回退。
+        return rule ?? new DontKnowRule { Integrand = integrand, Variable = variable };
+    }
+
+    /// <summary>
+    /// (EN) Try to match the integrand against a library of known atomic (single-step) rules.
+    /// (ZH) 尝试将被积表达式与已知原子（单步）规则库进行匹配。
+    /// </summary>
     private IntegrationRule? MatchAtomicRules(Expression integrand, Expression variable)
     {
-        // ∫ a dx (constant)
+        // (EN) ∫ a dx (constant). (ZH) ∫ a dx（常数）。
         if (!Structure.ContainsVariable(integrand, variable))
             return new ConstantRule
             {
                 Integrand = integrand, Variable = variable, Constant = integrand
             };
 
-        // Pattern: sin(x), cos(x), tan(x), etc.
+        // (EN) Pattern: sin(x), cos(x), tan(x), etc. (ZH) 模式：sin(x), cos(x), tan(x) 等。
         if (integrand is Expression.Function f)
         {
-            // Direct: f(x)
+            // (EN) Direct: f(x). (ZH) 直接形式：f(x)。
             if (f.Argument.Equals(variable))
             {
                 var rule = MatchDirectTrig(f, variable);
                 if (rule is not null) return rule;
             }
-            // Linear argument: f(a*x + b)
+            // (EN) Linear argument: f(a*x + b). (ZH) 线性参数：f(a*x + b)。
             else if (TryGetLinearCoeffs(f.Argument, variable, out var coeffA, out var coeffB))
             {
                 var result = TryLinearFunctionRule(f, coeffA, coeffB, variable);
@@ -80,48 +177,52 @@ internal class IntegrationSolver
             }
         }
 
-        // ∫ x^n dx (power rule)
+        // (EN) ∫ x^n dx (power rule). (ZH) ∫ x^n dx（幂规则）。
         if (TryPowerMatch(integrand, variable, out var powerRule))
             return powerRule;
 
-        // ∫ 1/x dx
+        // (EN) ∫ 1/x dx. (ZH) ∫ 1/x dx。
         if (integrand is Expression.Power { Base: var pb, Exponent: var pe } &&
             pb.Equals(variable) && Expression.IsMinusOne(pe))
         {
             return new ReciprocalRule { Integrand = integrand, Variable = variable, Base = variable };
         }
 
-        // ∫ 1/√(1-x²) dx  (ArcsinRule)
+        // (EN) ∫ 1/√(1-x²) dx  (ArcsinRule). (ZH) ∫ 1/√(1-x²) dx（ArcsinRule）。
         if (TryMatchArcsin(integrand, variable, out var arcsinRule))
             return arcsinRule;
 
-        // ∫ 1/√(ax²+bx+c) dx
+        // (EN) ∫ 1/√(ax²+bx+c) dx. (ZH) ∫ 1/√(ax²+bx+c) dx。
         if (TryMatchReciprocalSqrtQuadratic(integrand, variable, out var sqrtRule))
             return sqrtRule;
 
-        // ∫ √(ax²+bx+c) dx  (SqrtQuadraticRule)
+        // (EN) ∫ √(ax²+bx+c) dx  (SqrtQuadraticRule). (ZH) ∫ √(ax²+bx+c) dx（SqrtQuadraticRule）。
         if (TryMatchSqrtQuadratic(integrand, variable, out var sqrtQuadRule))
             return sqrtQuadRule;
 
-        // ∫ 1/(a+bx²) dx  (ArctanRule)
+        // (EN) ∫ 1/(a+bx²) dx  (ArctanRule). (ZH) ∫ 1/(a+bx²) dx（ArctanRule）。
         if (TryMatchArctan(integrand, variable, out var arctanRule))
             return arctanRule;
 
-        // ∫ exp(-x²) dx  (ErfRule)
+        // (EN) ∫ exp(-x²) dx  (ErfRule). (ZH) ∫ exp(-x²) dx（ErfRule）。
         if (TryMatchErf(integrand, variable, out var erfRule))
             return erfRule;
 
-        // ∫ sin(x)/x dx → Si(x),  ∫ eˣ/x dx → Ei(x)
+        // (EN) ∫ sin(x)/x dx → Si(x),  ∫ eˣ/x dx → Ei(x). (ZH) ∫ sin(x)/x dx → Si(x)，∫ eˣ/x dx → Ei(x)。
         if (TryMatchSpecialFunction(integrand, variable, out var specialRule))
             return specialRule;
 
-        // Orthogonal polynomials: ∫ P_n(x) dx, ∫ T_n(x) dx, etc.
+        // (EN) Orthogonal polynomials: ∫ P_n(x) dx, ∫ T_n(x) dx, etc. (ZH) 正交多项式：∫ P_n(x) dx、∫ T_n(x) dx 等。
         if (TryMatchOrthogonalPoly(integrand, variable, out var orthoRule))
             return orthoRule;
 
         return null;
     }
 
+    /// <summary>
+    /// (EN) Match ∫ x^n dx where the base is the integration variable.
+    /// (ZH) 匹配 ∫ x^n dx，其中底数为积分变量。
+    /// </summary>
     private bool TryPowerMatch(Expression integrand, Expression variable,
         out PowerRule? rule)
     {
@@ -135,7 +236,7 @@ internal class IntegrationSolver
             };
             return true;
         }
-        // x^1 → x
+        // (EN) x^1 → x. (ZH) x^1 → x。
         if (integrand.Equals(variable))
         {
             rule = new PowerRule
@@ -148,12 +249,16 @@ internal class IntegrationSolver
         return false;
     }
 
+    /// <summary>
+    /// (EN) Match ∫ 1/(a + b·x²) dx pattern for the arctan rule.
+    /// (ZH) 匹配 ∫ 1/(a + b·x²) dx 模式以应用 arctan 规则。
+    /// </summary>
     private bool TryMatchArctan(Expression integrand, Expression variable,
         out ArctanRule? rule)
     {
         rule = null;
 
-        // Pattern: 1 / (a + b*x^2)  or  1 / (a - b*x^2)
+        // (EN) Pattern: 1 / (a + b*x^2)  or  1 / (a - b*x^2). (ZH) 模式：1 / (a + b*x^2) 或 1 / (a - b*x^2)。
         if (integrand is Expression.Power p &&
             Expression.IsMinusOne(p.Exponent) &&
             p.Base is Expression.Sum sum)
@@ -188,13 +293,16 @@ internal class IntegrationSolver
         return false;
     }
 
-    /// <summary>Detect ∫ 1/√(a + bx + cx²) dx pattern.</summary>
+    /// <summary>
+    /// (EN) Detect ∫ 1/√(a + bx + cx²) dx pattern.
+    /// (ZH) 检测 ∫ 1/√(a + bx + cx²) dx 模式。
+    /// </summary>
     private bool TryMatchReciprocalSqrtQuadratic(Expression integrand, Expression variable,
         out ReciprocalSqrtQuadraticRule? rule)
     {
         rule = null;
 
-        // Pattern 1: (a + bx + cx²)^(-1/2)  i.e. Power(..., -1/2)
+        // (EN) Pattern 1: (a + bx + cx²)^(-1/2)  i.e. Power(..., -1/2). (ZH) 模式 1：(a + bx + cx²)^(-1/2)，即 Power(..., -1/2)。
         if (integrand is Expression.Power p &&
             p.Exponent is Expression.Number { Value: var expVal } &&
             expVal.Numerator == -1 && expVal.Denominator == 2)
@@ -210,7 +318,7 @@ internal class IntegrationSolver
             }
         }
 
-        // Pattern 2: 1/√(...) → Pow(Sqrt(...), -1)
+        // (EN) Pattern 2: 1/√(...) → Pow(Sqrt(...), -1). (ZH) 模式 2：1/√(...) → Pow(Sqrt(...), -1)。
         if (integrand is Expression.Power p2 && Expression.IsMinusOne(p2.Exponent) &&
             p2.Base is Expression.Power sqrt && sqrt.Exponent is Expression.Number { Value: var half }
             && half.Numerator == 1 && half.Denominator == 2)
@@ -228,13 +336,16 @@ internal class IntegrationSolver
         return false;
     }
 
-    /// <summary>∫ √(ax²+bx+c) dx → formula using the reciprocal sqrt quadratic.</summary>
+    /// <summary>
+    /// (EN) Match ∫ √(ax²+bx+c) dx → formula using the reciprocal sqrt quadratic.
+    /// (ZH) 匹配 ∫ √(ax²+bx+c) dx → 使用平方根倒数二次式公式。
+    /// </summary>
     private bool TryMatchSqrtQuadratic(Expression integrand, Expression variable,
         out SqrtQuadraticRule? rule)
     {
         rule = null;
 
-        // Pattern: √(a+bx+cx²) = Power(..., 1/2)
+        // (EN) Pattern: √(a+bx+cx²) = Power(..., 1/2). (ZH) 模式：√(a+bx+cx²) = Power(..., 1/2)。
         if (integrand is Expression.Power p &&
             p.Exponent is Expression.Number { Value: var expVal } &&
             expVal.Numerator == 1 && expVal.Denominator == 2)
@@ -258,12 +369,15 @@ internal class IntegrationSolver
         return false;
     }
 
-    /// <summary>∫ 1/√(1 - x²) dx = asin(x), ∫ 1/√(a - b*x²) dx = asin(x√(b/a))/√b</summary>
+    /// <summary>
+    /// (EN) Match ∫ 1/√(1-x²) dx = asin(x), ∫ 1/√(a-b*x²) dx = asin(x√(b/a))/√b.
+    /// (ZH) 匹配 ∫ 1/√(1-x²) dx = asin(x)，∫ 1/√(a-b*x²) dx = asin(x√(b/a))/√b。
+    /// </summary>
     private bool TryMatchArcsin(Expression integrand, Expression variable,
         out ArcsinRule? rule)
     {
         rule = null;
-        // Pattern: (1 - x²)^(-1/2)  or  (a - b*x²)^(-1/2)
+        // (EN) Pattern: (1 - x²)^(-1/2)  or  (a - b*x²)^(-1/2). (ZH) 模式：(1 - x²)^(-1/2) 或 (a - b*x²)^(-1/2)。
         if (integrand is Expression.Power p &&
             p.Exponent is Expression.Number { Value: var expVal } &&
             expVal.Numerator == -1 && expVal.Denominator == 2 &&
@@ -279,15 +393,15 @@ internal class IntegrationSolver
             }
             if (constantTerm is not null && x2Term is not null)
             {
-                // Verify the x² coefficient is negative: a - b*x²
+                // (EN) Verify the x² coefficient is negative: a - b*x². (ZH) 确认 x² 系数为负：a - b*x²。
                 bool negativeCoeff = x2Term is Expression.Product prod &&
                     prod.Factors.Count >= 2 &&
                     prod.Factors[0] is Expression.Number neg && neg.Value.IsMinusOne;
                 if (!negativeCoeff)
                 {
-                    // Also check if x² term is just -x² directly
+                    // (EN) Also check if x² term is just -x² directly. (ZH) 也检查 x² 项是否直接就是 -x²。
                     if (x2Term is Expression.Power)
-                        return false; // +x², not -x²
+                        return false; // (EN) +x², not -x². (ZH) 是 +x² 而非 -x²。
                 }
                 rule = new ArcsinRule
                 {
@@ -296,7 +410,7 @@ internal class IntegrationSolver
                 return true;
             }
         }
-        // Pattern: 1/√(1-x²)  via Sqrt
+        // (EN) Pattern: 1/√(1-x²)  via Sqrt. (ZH) 模式：通过 Sqrt 表示的 1/√(1-x²)。
         if (integrand is Expression.Power p2 && Expression.IsMinusOne(p2.Exponent) &&
             p2.Base is Expression.Power sqrt && sqrt.Exponent is Expression.Number { Value: var half2 }
             && half2.Numerator == 1 && half2.Denominator == 2 &&
@@ -310,7 +424,7 @@ internal class IntegrationSolver
             }
             if (ct is not null && x2 is not null)
             {
-                // Verify negative coefficient
+                // (EN) Verify negative coefficient. (ZH) 确认系数为负。
                 bool negativeCoeff = x2 is Expression.Product prod2 &&
                     prod2.Factors.Count >= 2 &&
                     prod2.Factors[0] is Expression.Number neg2 && neg2.Value.IsMinusOne;
@@ -323,28 +437,32 @@ internal class IntegrationSolver
         return false;
     }
 
-    /// <summary>∫ exp(-x²) dx = √π/2 · erf(x)</summary>
+    /// <summary>
+    /// (EN) Match ∫ exp(-x²) dx = √π/2 · erf(x).
+    /// (ZH) 匹配 ∫ exp(-x²) dx = √π/2 · erf(x)。
+    /// </summary>
     private bool TryMatchErf(Expression integrand, Expression variable,
         out ErfRule? rule)
     {
         rule = null;
-        // Pattern: exp(-x²)
+        // (EN) Pattern: exp(-x²). (ZH) 模式：exp(-x²)。
         if (integrand is Expression.Function { Op: FunctionType.Exp } f &&
             f.Argument is Expression.Power p && p.Base.Equals(variable) &&
             p.Exponent is Expression.Number n && n.Value.Numerator == 2 && n.Value.Denominator == 1 &&
             f.Argument is Expression.Power p2 && p2.Exponent is Expression.Number { Value: var expVal }
             && expVal.Numerator == 2 && expVal.Denominator == 1)
         {
-            // exp(-x²) → need to check for negative
+            // (EN) exp(-x²) → need to check for negative. (ZH) exp(-x²) → 需要检查负号。
             if (f.Argument is Expression.Power { Exponent: Expression.Number { Value: var ev2 } })
             {
-                // The Power is x^2, but we need -x^2 as the argument to exp
-                // Actually exp(-x²) would be Exp(Negate(Pow(x, 2)))
+                // (EN) The Power is x^2, but we need -x^2 as the argument to exp.
+                // (ZH) Power 是 x^2，但需要 -x^2 作为 exp 的参数。
                 rule = new ErfRule { Integrand = integrand, Variable = variable };
                 return true;
             }
         }
-        // exp(-x²) where the inner is Pow(x, 2) multiplied by -1
+        // (EN) exp(-x²) where the inner is Pow(x, 2) multiplied by -1.
+        // (ZH) exp(-x²)，其中内部是 Pow(x, 2) 乘以 -1。
         if (integrand is Expression.Function { Op: FunctionType.Exp, Argument: var arg } &&
             arg is Expression.Product prod && prod.Factors.Count == 2 &&
             prod.Factors[0] is Expression.Number neg && neg.Value.IsMinusOne &&
@@ -354,27 +472,33 @@ internal class IntegrationSolver
             rule = new ErfRule { Integrand = integrand, Variable = variable };
             return true;
         }
-        // Also handle Pow(x, 2) directly being the argument with Negate
+        // (EN) Also handle Pow(x, 2) directly being the argument with Negate.
+        // (ZH) 也处理 Pow(x, 2) 直接作为参数且带有 Negate 的情形。
         if (integrand is Expression.Function { Op: FunctionType.Exp, Argument: var arg2 } &&
             arg2 is Expression.Power pw2 && pw2.Base.Equals(variable) &&
             pw2.Exponent is Expression.Number n3 && n3.Value.ToInt32() == 2)
         {
-            // exp(x²) → not Erf, but check if there's a Negate...
-            // Actually exp(x²) is not an Erf integral
+            // (EN) exp(x²) is not an Erf integral. (ZH) exp(x²) 不是 Erf 积分。
         }
         return false;
     }
 
-    /// <summary>∫ sin(x)/x → Si(x), ∫ cos(x)/x → Ci(x), ∫ eˣ/x → Ei(x), etc.</summary>
+    /// <summary>
+    /// (EN) Match special function integrals: Si, Ci, Shi, Chi, Ei, Li, Fresnel,
+    ///      Polylog, UpperGamma, OwensT, EllipticF, EllipticE.
+    /// (ZH) 匹配特殊函数积分：Si、Ci、Shi、Chi、Ei、Li、Fresnel、
+    ///      Polylog、UpperGamma、OwensT、EllipticF、EllipticE。
+    /// </summary>
     private bool TryMatchSpecialFunction(Expression integrand, Expression variable,
         out IntegrationRule? rule)
     {
         rule = null;
 
-        // ── Product-based patterns ───────────────────────────────
+        // (EN) ── Product-based patterns. (ZH) ── 基于乘积的模式。
         if (integrand is Expression.Product prod && prod.Factors.Count >= 2)
         {
-            // --- Si / Ci / Shi / Chi / Ei patterns: func(x) / x ---
+            // (EN) --- Si / Ci / Shi / Chi / Ei patterns: func(x) / x ---
+            // (ZH) --- Si / Ci / Shi / Chi / Ei 模式：func(x) / x ---
             Expression? funcPart = null, recipPart = null;
             foreach (var f in prod.Factors)
             {
@@ -400,22 +524,25 @@ internal class IntegrationSolver
                 return rule is not null;
             }
 
-            // --- PolylogRule: polylog(b, a·x) / x ---
+            // (EN) --- PolylogRule: polylog(b, a·x) / x ---
+            // (ZH) --- PolylogRule: polylog(b, a·x) / x ---
             if (TryMatchPolylog(prod, variable, out rule))
                 return true;
 
-            // --- UpperGammaRule: x^n · exp(a·x) ---
+            // (EN) --- UpperGammaRule: x^n · exp(a·x) ---
+            // (ZH) --- UpperGammaRule: x^n · exp(a·x) ---
             if (TryMatchUpperGamma(prod, variable, out rule))
                 return true;
 
-            // --- OwensTRule: exp(-(ax+b)²) · erf(y·(ax+b)) ---
+            // (EN) --- OwensTRule: exp(-(ax+b)²) · erf(y·(ax+b)) ---
+            // (ZH) --- OwensTRule: exp(-(ax+b)²) · erf(y·(ax+b)) ---
             if (TryMatchOwensT(prod, variable, out rule))
                 return true;
         }
 
-        // ── Power-based patterns ─────────────────────────────────
+        // (EN) ── Power-based patterns. (ZH) ── 基于幂的模式。
 
-        // 1/ln(x) → Li(x)
+        // (EN) 1/ln(x) → Li(x). (ZH) 1/ln(x) → Li(x)。
         if (integrand is Expression.Power { Base: var lb, Exponent: var le } &&
             lb is Expression.Function { Op: FunctionType.Ln, Argument: var lnArg } &&
             lnArg.Equals(variable) && Expression.IsMinusOne(le))
@@ -424,7 +551,7 @@ internal class IntegrationSolver
             return true;
         }
 
-        // sin(x²) / cos(x²) → Fresnel
+        // (EN) sin(x²) / cos(x²) → Fresnel. (ZH) sin(x²) / cos(x²) → Fresnel。
         if (integrand is Expression.Function fresFn &&
             fresFn.Argument is Expression.Power pw && pw.Base.Equals(variable) &&
             pw.Exponent is Expression.Number ne && ne.Value.ToInt32() == 2)
@@ -438,87 +565,96 @@ internal class IntegrationSolver
             return rule is not null;
         }
 
-        // --- EllipticFRule: 1/√(a - d·sin²(x)) ---
+        // (EN) --- EllipticFRule: 1/√(a - d·sin²(x)) ---
+        // (ZH) --- EllipticFRule: 1/√(a - d·sin²(x)) ---
         if (TryMatchEllipticF(integrand, variable, out rule))
             return true;
 
-        // --- EllipticERule: √(a - d·sin²(x)) ---
+        // (EN) --- EllipticERule: √(a - d·sin²(x)) ---
+        // (ZH) --- EllipticERule: √(a - d·sin²(x)) ---
         if (TryMatchEllipticE(integrand, variable, out rule))
             return true;
 
         return false;
     }
 
-/// <summary>Match ∫ exp(-(ax+b)²) · erf(y·(ax+b)) dx</summary>
-private bool TryMatchOwensT(Expression.Product prod, Expression v,
-    out IntegrationRule? rule)
-{
-    rule = null;
-    Expression? expBase = null, erfBase = null, y = null;
-    Expression? a = null, b = null;
-
-    foreach (var f in prod.Factors)
+    /// <summary>
+    /// (EN) Match ∫ exp(-(ax+b)²) · erf(y·(ax+b)) dx for Owens T function.
+    /// (ZH) 匹配 ∫ exp(-(ax+b)²) · erf(y·(ax+b)) dx 以应用 Owens T 函数。
+    /// </summary>
+    private bool TryMatchOwensT(Expression.Product prod, Expression v,
+        out IntegrationRule? rule)
     {
-        // exp(-(ax+b)²)
-        if (f is Expression.Function { Op: FunctionType.Exp, Argument: var arg })
+        rule = null;
+        Expression? expBase = null, erfBase = null, y = null;
+        Expression? a = null, b = null;
+
+        foreach (var f in prod.Factors)
         {
-            // -(ax+b)² is represented as Product([-1, Pow(Sum(ax, b), 2)])
-            if (arg is Expression.Product neg &&
-                neg.Factors.Count == 2 &&
-                neg.Factors[0] is Expression.Number { Value.IsMinusOne: true } &&
-                neg.Factors[1] is Expression.Power pow &&
-                pow.Exponent is Expression.Number { Value: var ev } &&
-                ev.IsInteger && ev.ToInt32() == 2 &&
-                TryMatchLinearSum(pow.Base, v, out var ea, out var eb))
+            // (EN) exp(-(ax+b)²). (ZH) exp(-(ax+b)²)。
+            if (f is Expression.Function { Op: FunctionType.Exp, Argument: var arg })
             {
-                expBase = f;
-                a = ea; b = eb;
-            }
-        }
-        
-        // erf(y·(ax+b))
-        if (f is Expression.Function { Op: FunctionType.Erf, Argument: var erfArg })
-        {
-            if (TryMatchLinearSum(erfArg, v, out var erfa, out var erfb))
-            {
-                // y=1, ax+b case
-                if (erfa is Expression.Number erfn && erfn.Value.IsOne &&
-                    (erfb is Expression.Number erfn2 && erfn2.Value.IsZero))
+                // (EN) -(ax+b)² is represented as Product([-1, Pow(Sum(ax, b), 2)]).
+                // (ZH) -(ax+b)² 表示为 Product([-1, Pow(Sum(ax, b), 2)])。
+                if (arg is Expression.Product neg &&
+                    neg.Factors.Count == 2 &&
+                    neg.Factors[0] is Expression.Number { Value.IsMinusOne: true } &&
+                    neg.Factors[1] is Expression.Power pow &&
+                    pow.Exponent is Expression.Number { Value: var ev } &&
+                    ev.IsInteger && ev.ToInt32() == 2 &&
+                    TryMatchLinearSum(pow.Base, v, out var ea, out var eb))
                 {
-                    erfBase = f; y = One;
+                    expBase = f;
+                    a = ea; b = eb;
                 }
-                else
+            }
+
+            // (EN) erf(y·(ax+b)). (ZH) erf(y·(ax+b))。
+            if (f is Expression.Function { Op: FunctionType.Erf, Argument: var erfArg })
+            {
+                if (TryMatchLinearSum(erfArg, v, out var erfa, out var erfb))
                 {
+                    // (EN) y=1, ax+b case. (ZH) y=1, ax+b 情形。
+                    if (erfa is Expression.Number erfn && erfn.Value.IsOne &&
+                        (erfb is Expression.Number erfn2 && erfn2.Value.IsZero))
+                    {
+                        erfBase = f; y = One;
+                    }
+                    else
+                    {
+                        erfBase = f;
+                        y = erfa;
+                    }
+                }
+                else if (erfArg is Expression.Product ep &&
+                         ep.Factors.Count == 2 &&
+                         TryMatchLinearSum(ep.Factors[^1], v, out var erfa2, out var erfb2))
+                {
+                    y = ep.Factors[0];
                     erfBase = f;
-                    y = erfa;
                 }
             }
-            else if (erfArg is Expression.Product ep &&
-                     ep.Factors.Count == 2 &&
-                     TryMatchLinearSum(ep.Factors[^1], v, out var erfa2, out var erfb2))
-            {
-                y = ep.Factors[0];
-                erfBase = f;
-            }
         }
-    }
 
-    if (expBase is not null && erfBase is not null && a is not null && b is not null && y is not null)
-    {
-        // Skip y=1 (already handled by ErfRule)
-        if (y is Expression.Number yn && yn.Value.IsOne)
-            return false;
-        rule = new OwensTRule
+        if (expBase is not null && erfBase is not null && a is not null && b is not null && y is not null)
         {
-            Integrand = prod, Variable = v,
-            A = a, B = b, Y = y
-        };
-        return true;
+            // (EN) Skip y=1 (already handled by ErfRule). (ZH) 跳过 y=1（已由 ErfRule 处理）。
+            if (y is Expression.Number yn && yn.Value.IsOne)
+                return false;
+            rule = new OwensTRule
+            {
+                Integrand = prod, Variable = v,
+                A = a, B = b, Y = y
+            };
+            return true;
+        }
+        return false;
     }
-    return false;
-}
 
-    /// <summary>Match ∫ polylog(b, a·x) / x dx</summary>
+    /// <summary>
+    /// (EN) Match ∫ polylog(b, a·x) / x dx.
+    /// (ZH) 匹配 ∫ polylog(b, a·x) / x dx。
+    /// </summary>
     private bool TryMatchPolylog(Expression.Product prod, Expression v,
         out IntegrationRule? rule)
     {
@@ -534,13 +670,13 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
             else if (f is Expression.FunctionN fn && fn.Op == FunctionNType.Polylog &&
                      fn.Arguments.Count == 2)
             {
-                // fn.Arguments = [b, inner], inner = a*v
+                // (EN) fn.Arguments = [b, inner], inner = a*v. (ZH) fn.Arguments = [b, inner]，inner = a*v。
                 b = fn.Arguments[0];
                 if (fn.Arguments[1] is Expression.Product axProd &&
                     axProd.Factors.Count == 2 &&
                     axProd.Factors[^1].Equals(v))
                 {
-                    // a is the other factor
+                    // (EN) a is the other factor. (ZH) a 是另一个因子。
                     a = axProd.Factors.Count == 2
                         ? (axProd.Factors[0].Equals(v) ? One : axProd.Factors[0])
                         : null;
@@ -563,7 +699,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>Match ∫ x^n · exp(a·x) dx  (n ≥ 0 integer)</summary>
+    /// <summary>
+    /// (EN) Match ∫ x^n · exp(a·x) dx  (n ≥ 0 integer) for the upper incomplete gamma function.
+    /// (ZH) 匹配 ∫ x^n · exp(a·x) dx（n ≥ 0 整数）以应用上不完全 Gamma 函数。
+    /// </summary>
     private bool TryMatchUpperGamma(Expression.Product prod, Expression v,
         out IntegrationRule? rule)
     {
@@ -573,7 +712,7 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
 
         foreach (var f in prod.Factors)
         {
-            // x^n  (n ≥ 0 integer)
+            // (EN) x^n  (n ≥ 0 integer). (ZH) x^n（n ≥ 0 整数）。
             if (f is Expression.Power { Base: var pb, Exponent: var pe } &&
                 pb.Equals(v) && pe is Expression.Number { Value: var nv } &&
                 nv.IsInteger && nv.ToInt32() >= 0)
@@ -586,7 +725,7 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                 hasPow = true;
                 e = One;
             }
-            // exp(a·x)
+            // (EN) exp(a·x). (ZH) exp(a·x)。
             else if (f is Expression.Function { Op: FunctionType.Exp, Argument: var expArg })
             {
                 if (expArg is Expression.Product expProd &&
@@ -606,7 +745,8 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
 
         if (hasPow && hasExp && a is not null && e is not null)
         {
-            // Only use UpperGamma when n ≥ 2 — simpler cases use PartsRule
+            // (EN) Only use UpperGamma when n ≥ 2 — simpler cases use PartsRule.
+            // (ZH) 仅在 n ≥ 2 时使用 UpperGamma——较简单的情形由 PartsRule 处理。
             if (e is Expression.Number ne && ne.Value.IsInteger && ne.Value.ToInt32() < 2)
                 return false;
             rule = new UpperGammaRule
@@ -618,13 +758,17 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>Match ∫ 1/√(a - d·sin²(x)) dx</summary>
+    /// <summary>
+    /// (EN) Match ∫ 1/√(a - d·sin²(x)) dx for the elliptic integral of the first kind.
+    /// (ZH) 匹配 ∫ 1/√(a - d·sin²(x)) dx 以应用第一类椭圆积分。
+    /// </summary>
     private bool TryMatchEllipticF(Expression integrand, Expression v,
         out IntegrationRule? rule)
     {
         rule = null;
-        // Pattern: Power(Power(a - d*sin(v)², 1/2), -1)   i.e. 1/sqrt(...)
-        //          or Power(a - d*sin(v)², -1/2)
+        // (EN) Pattern: Power(Power(a - d*sin(v)², 1/2), -1)   i.e. 1/sqrt(...)
+        // (ZH) 模式：Power(Power(a - d*sin(v)², 1/2), -1)   即 1/sqrt(...)
+        // (EN) or Power(a - d*sin(v)², -1/2). (ZH) 或 Power(a - d*sin(v)², -1/2)。
         Expression? baseExpr = null;
         if (integrand is Expression.Power tp &&
             tp.Exponent is Expression.Number tpn && tpn.Value.IsMinusOne &&
@@ -645,7 +789,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>Match ∫ √(a - d·sin²(x)) dx</summary>
+    /// <summary>
+    /// (EN) Match ∫ √(a - d·sin²(x)) dx for the elliptic integral of the second kind.
+    /// (ZH) 匹配 ∫ √(a - d·sin²(x)) dx 以应用第二类椭圆积分。
+    /// </summary>
     private bool TryMatchEllipticE(Expression integrand, Expression v,
         out IntegrationRule? rule)
     {
@@ -662,14 +809,17 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>Try to match a - d·sin(x)² form from a base expression, returning rule.</summary>
+    /// <summary>
+    /// (EN) Try to match a - d·sin(x)² form from a base expression, returning rule.
+    /// (ZH) 尝试从底表达式匹配 a - d·sin(x)² 形式，返回规则。
+    /// </summary>
     private bool TryMatchEllipticArgs(Expression baseExpr, Expression v,
         out IntegrationRule? rule, bool isE = false)
     {
         rule = null;
         if (baseExpr is Expression.Sum sum && sum.Terms.Count == 2)
         {
-            // Find constant term 'a' and the -d*sin(v)² term
+            // (EN) Find constant term 'a' and the -d*sin(v)² term. (ZH) 找到常数项 'a' 和 -d*sin(v)² 项。
             Expression? aConst = null, d = null;
             foreach (var t in sum.Terms)
             {
@@ -680,7 +830,7 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                 else if (t is Expression.Product negProd && negProd.Factors.Count == 2 &&
                          negProd.Factors[0] is Expression.Number { Value.IsMinusOne: true })
                 {
-                    // -d*sin²(v)
+                    // (EN) -d*sin²(v). (ZH) -d*sin²(v)。
                     var rest = negProd.Factors[1];
                     if (rest is Expression.Power sinPow &&
                         sinPow.Exponent is Expression.Number { Value: var sv } &&
@@ -688,7 +838,7 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                         sinPow.Base is Expression.Function { Op: FunctionType.Sin, Argument: var sa } &&
                         sa.Equals(v))
                     {
-                        d = One;  // coefficient = 1 (since it's -1*sin²)
+                        d = One;  // (EN) coefficient = 1 (since it's -1*sin²). (ZH) 系数 = 1（因为它是 -1*sin²）。
                     }
                     else if (rest is Expression.Product dProd &&
                              dProd.Factors.Count == 2 &&
@@ -698,14 +848,14 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                              dSinPow.Base is Expression.Function { Op: FunctionType.Sin, Argument: var sa2 } &&
                              sa2.Equals(v))
                     {
-                        d = dProd.Factors[0]; // d coefficient
+                        d = dProd.Factors[0]; // (EN) d coefficient. (ZH) d 系数。
                     }
                 }
                 else if (t is Expression.Product negProd2 &&
                          negProd2.Factors.Count == 3 &&
                          negProd2.Factors[0] is Expression.Number { Value.IsMinusOne: true })
                 {
-                    // -d*sin²(v)
+                    // (EN) -d*sin²(v). (ZH) -d*sin²(v)。
                     if (negProd2.Factors[2] is Expression.Power dSinPow2 &&
                         dSinPow2.Exponent is Expression.Number { Value: var sv3 } &&
                         sv3.IsInteger && sv3.ToInt32() == 2 &&
@@ -718,7 +868,7 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
             }
             if (aConst is not null && d is not null)
             {
-                // Constraint: a != d
+                // (EN) Constraint: a != d. (ZH) 约束条件：a != d。
                 if (aConst.Equals(d))
                     return false;
                 if (isE)
@@ -732,8 +882,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
     }
 
     /// <summary>
-    /// Try to match a sum as a·v + b, i.e. a linear expression in v.
-    /// Returns a,b where the sum equals a*v + b.
+    /// (EN) Try to match a sum as a·v + b, i.e. a linear expression in v.
+    ///      Returns a,b where the sum equals a*v + b.
+    /// (ZH) 尝试将和式匹配为 a·v + b 形式（v 的线性表达式）。
+    ///      返回 a,b 使得和式等于 a*v + b。
     /// </summary>
     private bool TryMatchLinearSum(Expression expr, Expression v,
         out Expression a, out Expression b)
@@ -778,7 +930,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>Orthogonal polynomials: P_n(x), T_n(x), H_n(x), L_n(x), etc.</summary>
+    /// <summary>
+    /// (EN) Match orthogonal polynomials: P_n(x), T_n(x), H_n(x), L_n(x), etc.
+    /// (ZH) 匹配正交多项式：P_n(x)、T_n(x)、H_n(x)、L_n(x) 等。
+    /// </summary>
     private bool TryMatchOrthogonalPoly(Expression integrand, Expression variable,
         out IntegrationRule? rule)
     {
@@ -787,7 +942,8 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
             fn.Arguments[^1].Equals(variable))
         {
             var n = fn.Arguments[0];
-            // For two-parameter polynomials, extract a,b from remaining args
+            // (EN) For two-parameter polynomials, extract a,b from remaining args.
+            // (ZH) 对于双参数多项式，从剩余参数中提取 a、b。
             Expression? a = fn.Arguments.Count >= 2 ? fn.Arguments[1] : null;
             Expression? b = fn.Arguments.Count >= 3 ? fn.Arguments[2] : null;
 
@@ -822,6 +978,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
+    /// <summary>
+    /// (EN) Check if an expression is of the form x² or b·x².
+    /// (ZH) 检查表达式是否为 x² 或 b·x² 形式。
+    /// </summary>
     private static bool IsX2Term(Expression e, Expression v) => e switch
     {
         Expression.Power tp => tp.Base.Equals(v) &&
@@ -832,7 +992,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         _ => false
     };
 
-    /// <summary>Try to parse a quadratic expression: a + b*x + c*x².</summary>
+    /// <summary>
+    /// (EN) Try to parse a quadratic expression: a + b*x + c*x².
+    /// (ZH) 尝试解析二次表达式：a + b*x + c*x²。
+    /// </summary>
     private static bool TryExtractQuadratic(Expression expr, Expression v,
         out Expression a, out Expression b, out Expression c)
     {
@@ -873,6 +1036,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return foundCount >= 2;
     }
 
+    /// <summary>
+    /// (EN) Match ∫(f+g) dx = ∫f dx + ∫g dx by splitting the sum into additive terms.
+    /// (ZH) 匹配 ∫(f+g) dx = ∫f dx + ∫g dx，将和式拆分为加法项分别积分。
+    /// </summary>
     private IntegrationRule? MatchSumRule(Expression integrand, Expression variable)
     {
         var summands = Algebraic.Summands(integrand);
@@ -885,6 +1052,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         };
     }
 
+    /// <summary>
+    /// (EN) Match ∫ a·f(x) dx = a·∫ f(x) dx by extracting constant factors.
+    /// (ZH) 匹配 ∫ a·f(x) dx = a·∫ f(x) dx，提取常数因子到积分号外。
+    /// </summary>
     private IntegrationRule? MatchConstantTimesRule(Expression integrand, Expression variable)
     {
         var factors = Algebraic.Factors(integrand);
@@ -914,23 +1085,34 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return null;
     }
 
-    // ── Substitution (u-sub) strategy ──
+    // ── Substitution (u-sub) strategy ────────────────────────────
+    // (EN) Try u-substitution: f(g(x))*g'(x) dx → ∫ f(u) du.
+    // (ZH) 尝试换元积分：f(g(x))*g'(x) dx → ∫ f(u) du。
 
+    /// <summary>
+    /// (EN) Try u-substitution: find a candidate sub-expression whose derivative appears
+    ///      as a factor in the integrand.
+    /// (ZH) 尝试换元积分：寻找候选子表达式，其导数以因子形式出现在被积表达式中。
+    /// </summary>
     private IntegrationRule? TrySubstitutionRule(Expression integrand, Expression variable)
     {
         var candidates = CollectPotentialSubstitutions(integrand, variable);
         foreach (var uExpr in candidates)
         {
-            var du = DifferentiateApprox(uExpr, variable);
+            var du = Differentiate.Diff(uExpr, variable);
             if (du is not null && !Expression.IsOne(du))
             {
-                var result = ExtractFactorWithCoeff(integrand, du, variable);
+                var result = FactorOutDerivative(integrand, du, variable);
                 if (result is not null)
                 {
                     var (remaining, coeff) = result.Value;
                     var uVar = Symbol("__u__");
-                    // Substitute uExpr (e.g. x^2) with uVar (e.g. __u__)
+                    // (EN) Substitute uExpr (e.g. x^2) with uVar (e.g. __u__). (ZH) 将 uExpr（如 x^2）替换为 uVar（如 __u__）。
                     var fOfUNew = Structure.Substitute(uExpr, uVar, remaining);
+                    // (EN) The remainder must become a function of u alone; otherwise the change of
+                    //      variable is invalid and we must not use it.
+                    // (ZH) 余项必须化为仅含 u 的函数；否则换元不成立，不能采用。
+                    if (Structure.ContainsVariable(fOfUNew, variable)) continue;
                     var substep = Solve(fOfUNew, uVar);
                     if (!substep.ContainsDontKnow)
                     {
@@ -939,7 +1121,7 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                             Integrand = integrand, Variable = variable,
                             UVar = uVar, UFunc = uExpr, Substeps = substep
                         };
-                        // If coeff is not 1, wrap in constant rule
+                        // (EN) If coeff is not 1, wrap in constant rule. (ZH) 若 coeff 不为 1，则用常数规则包装。
                         if (!Expression.IsOne(coeff))
                             return new ConstantTimesRule
                             {
@@ -954,6 +1136,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return TryLinearSubstitution(integrand, variable);
     }
 
+    /// <summary>
+    /// (EN) Try linear substitution: replace a sum containing the variable with a single symbol.
+    /// (ZH) 尝试线性换元：将包含变量的和式替换为单个符号。
+    /// </summary>
     private IntegrationRule? TryLinearSubstitution(Expression integrand, Expression variable)
     {
         var candidates = Structure.CollectAll(integrand,
@@ -975,14 +1161,37 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return null;
     }
 
-    // ── Integration by parts (LIATE) strategy ──
+    // ── Integration by parts (LIATE) strategy ────────────────────
+    // (EN) ∫ u dv = u·v − ∫ v du, choosing u via LIATE priority.
+    // (ZH) ∫ u dv = u·v − ∫ v du，按 LIATE 优先级选择 u。
 
+    /// <summary>
+    /// (EN) Try integration by parts using the LIATE priority heuristic to choose u and dv.
+    /// (ZH) 尝试分部积分，使用 LIATE 优先级启发式方法选择 u 和 dv。
+    /// </summary>
     private IntegrationRule? TryPartsRule(Expression integrand, Expression variable)
     {
-        if (integrand is not Expression.Product prod || prod.Factors.Count < 2)
+        // (EN) Parts is normally applied to a product, but a single non-polynomial function
+        //      (e.g. ln(x), asin(x), erf(x)) is also a valid case with dv = dx.
+        // (ZH) 分部积分通常用于乘积，但单个非多项式函数（如 ln(x)、asin(x)、erf(x)）也是
+        //      合法情形，此时取 dv = dx。
+        List<Expression> factors;
+        bool singleFunction;
+        if (integrand is Expression.Product prod && prod.Factors.Count >= 2)
+        {
+            factors = prod.Factors.ToList();
+            singleFunction = false;
+        }
+        else if (IsSinglePartsCandidate(integrand))
+        {
+            factors = new List<Expression> { integrand };
+            singleFunction = true;
+        }
+        else
+        {
             return null;
+        }
 
-        var factors = prod.Factors.ToList();
         int bestPri = -1;
         Expression? u = null;
         int uIdx = -1;
@@ -994,18 +1203,32 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         }
 
         if (u is null || uIdx < 0) return null;
-        var dvFactors = new List<Expression>(factors);
-        dvFactors.RemoveAt(uIdx);
-        var dv = dvFactors.Count == 1 ? dvFactors[0] : new Expression.Product(dvFactors);
 
-        var vStep = Solve(dv, variable);
-        if (vStep.ContainsDontKnow) return null;
+        Expression dv;
+        IntegrationRule vStep;
+        if (singleFunction)
+        {
+            // (EN) dv = dx, so v = x via the constant rule. (ZH) dv = dx，故 v = x（常数规则）。
+            dv = One;
+            vStep = new ConstantRule { Integrand = One, Variable = variable, Constant = One };
+        }
+        else
+        {
+            var dvFactors = new List<Expression>(factors);
+            dvFactors.RemoveAt(uIdx);
+            dv = dvFactors.Count == 1 ? dvFactors[0] : new Expression.Product(dvFactors);
+            vStep = Solve(dv, variable);
+            if (vStep.ContainsDontKnow) return null;
+        }
 
-        var uPrime = DifferentiateApprox(u, variable);
+        var uPrime = Differentiate.Diff(u, variable);
         if (uPrime is null) return null;
 
         var v = vStep.Eval();
+        // (EN) Bail out before multiplying by an already huge antiderivative. (ZH) 若原函数已过于庞大，则在相乘前放弃。
+        if (Structure.CountOperators(v) > MaxIntegrandNodes) return null;
         var secondIntegrand = Multiply(v, uPrime);
+        if (Structure.CountOperators(secondIntegrand) > MaxIntegrandNodes) return null;
         var secondStep = Solve(secondIntegrand, variable);
         if (secondStep.ContainsDontKnow) return null;
 
@@ -1017,18 +1240,35 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         };
     }
 
-    // ── Rational function integration ──
+    /// <summary>
+    /// (EN) Whether a non-product integrand may be handled by parts with dv = dx: it must be a
+    ///      single non-polynomial function (or a two-argument logarithm) that has LIATE priority.
+    /// (ZH) 非乘积被积式能否以 dv = dx 用分部积分处理：它须是单个非多项式函数（或双参数对数）
+    ///      且具有 LIATE 优先级。
+    /// </summary>
+    private static bool IsSinglePartsCandidate(Expression e) =>
+        e is Expression.Function
+        || (e is Expression.FunctionN fn && fn.Op == FunctionNType.Log);
 
+    // ── Rational function integration ─────────────────────────────
+    // (EN) Match reciprocal power forms and apply partial fractions or simple log/power rules.
+    // (ZH) 匹配倒数幂形式，应用部分分式分解或简单对数/幂规则。
+
+    /// <summary>
+    /// (EN) Try rational function integration by matching reciprocal power forms and
+    ///      applying partial fractions or simple log/power rules.
+    /// (ZH) 尝试有理函数积分：匹配倒数幂形式，应用部分分式分解或简单对数/幂规则。
+    /// </summary>
     private IntegrationRule? TryRationalRule(Expression integrand, Expression variable)
     {
         if (!IsReciprocalPowerForm(integrand, variable, out var baseExpr, out var expExpr))
             return null;
 
-        // ── Case 1: Denominator is a Product of factors → partial fractions ──
+        // (EN) ── Case 1: Denominator is a Product of factors → partial fractions. (ZH) ── 情形 1：分母为多个因子的乘积 → 部分分式。
         if (Expression.IsMinusOne(expExpr) && TryPartialFractions(baseExpr, variable, out var partialRule))
             return partialRule;
 
-        // ── Case 2: ∫ 1/(a*x + b) dx = ln|a*x+b|/a ──
+        // (EN) ── Case 2: ∫ 1/(a*x + b) dx = ln|a*x+b|/a. (ZH) ── 情形 2：∫ 1/(a*x + b) dx = ln|a*x+b|/a。
         if (Expression.IsMinusOne(expExpr))
         {
             var a = TryExtractLinearCoeff(baseExpr, variable);
@@ -1054,7 +1294,7 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
             };
         }
 
-        // ── Case 3: ∫ 1/(a*x + b)^k dx = (a*x+b)^(1-k)/(a*(1-k)) ──
+        // (EN) ── Case 3: ∫ 1/(a*x + b)^k dx = (a*x+b)^(1-k)/(a*(1-k)). (ZH) ── 情形 3：∫ 1/(a*x + b)^k dx = (a*x+b)^(1-k)/(a*(1-k))。
         if (expExpr is Expression.Number expN && expN.Value.IsInteger)
         {
             var a = TryExtractLinearCoeff(baseExpr, variable) ?? One;
@@ -1075,16 +1315,19 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return null;
     }
 
-    /// <summary>Try partial fraction decomposition for Product denominators.</summary>
+    /// <summary>
+    /// (EN) Try partial fraction decomposition for Product denominators.
+    /// (ZH) 尝试对乘积分母进行部分分式分解。
+    /// </summary>
     private bool TryPartialFractions(Expression denom, Expression v,
         out IntegrationRule? rule)
     {
         rule = null;
-        // Collect linear factors from the denominator
+        // (EN) Collect linear factors from the denominator. (ZH) 从分母中收集线性因子。
         var factors = Algebraic.Factors(denom);
         if (factors.Count < 2) return false;
 
-        // Check each factor is linear in v (v - r) or (a*v + b)
+        // (EN) Check each factor is linear in v (v - r) or (a*v + b). (ZH) 检查每个因子是否为 v 的线性形式 (v - r) 或 (a*v + b)。
         var linearFactors = new List<(Expression Expr, Expression Root, Expression Coeff)>();
         foreach (var f in factors)
         {
@@ -1096,8 +1339,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
 
         if (linearFactors.Count < 2) return false;
 
-        // Cover-up method for distinct linear factors
-        // For each factor (v - r_i), coefficient A_i = 1 / ∏_{j≠i} (r_i - r_j)
+        // (EN) Cover-up method for distinct linear factors.
+        // (ZH) 相异线性因子的遮盖法（cover-up method）。
+        // (EN) For each factor (v - r_i), coefficient A_i = 1 / ∏_{j≠i} (r_i - r_j).
+        // (ZH) 对每个因子 (v - r_i)，系数 A_i = 1 / ∏_{j≠i} (r_i - r_j)。
         var terms = new List<IntegrationRule>();
         var addTerms = new List<Expression>();
 
@@ -1113,10 +1358,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                 ai = ai * (ri - rj);
             }
 
-            // A_i = 1 / ∏_{j≠i} (r_i - r_j)
+            // (EN) A_i = 1 / ∏_{j≠i} (r_i - r_j). (ZH) A_i = 1 / ∏_{j≠i} (r_i - r_j)。
             ai = Divide(One, ai);
 
-            // If coeff != 1, multiply: A_i = A_i / coeff
+            // (EN) If coeff != 1, multiply: A_i = A_i / coeff. (ZH) 若 coeff != 1，则 A_i = A_i / coeff。
             var coeff_i = linearFactors[i].Coeff;
             if (!Expression.IsOne(coeff_i))
                 ai = Divide(ai, coeff_i);
@@ -1153,7 +1398,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>If expr is (v - r) or (a*v + b), return (v - r) form with root r and coeff a.</summary>
+    /// <summary>
+    /// (EN) If expr is (v - r) or (a*v + b), return (v - r) form with root r and coeff a.
+    /// (ZH) 若表达式为 (v - r) 或 (a*v + b)，以 (v - r) 形式返回根 r 与系数 a。
+    /// </summary>
     private static bool TryGetLinearRoot(Expression expr, Expression v,
         out Expression root, out Expression coeff)
     {
@@ -1173,7 +1421,11 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                 else if (t is Expression.Product prod && prod.Factors.Any(f => f.Equals(v)))
                 {
                     var others = prod.Factors.Where(f => !f.Equals(v)).ToList();
-                    coeffTerm = others.Count == 1 ? others[0] : new Expression.Product(others);
+                    var c = others.Count == 1 ? others[0] : new Expression.Product(others);
+                    // (EN) The coefficient must be free of the variable, otherwise the factor is not linear.
+                    // (ZH) 系数必须与变量无关，否则该因子不是线性式。
+                    if (Structure.ContainsVariable(c, v)) return false;
+                    coeffTerm = c;
                 }
                 else return false;
             }
@@ -1189,7 +1441,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         if (expr is Expression.Product prod2 && prod2.Factors.Any(f => f.Equals(v)))
         {
             var others = prod2.Factors.Where(f => !f.Equals(v)).ToList();
-            coeff = others.Count == 1 ? others[0] : new Expression.Product(others);
+            var c2 = others.Count == 1 ? others[0] : new Expression.Product(others);
+            // (EN) Coefficient must be variable-free. (ZH) 系数必须与变量无关。
+            if (Structure.ContainsVariable(c2, v)) return false;
+            coeff = c2;
             root = Zero;
             return true;
         }
@@ -1197,14 +1452,17 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>Check if integrand is 1/(baseExpr)^k where k > 0.</summary>
+    /// <summary>
+    /// (EN) Check if integrand is 1/(baseExpr)^k where k &gt; 0.
+    /// (ZH) 检查被积表达式是否为 1/(baseExpr)^k（k &gt; 0）。
+    /// </summary>
     private static bool IsReciprocalPowerForm(Expression expr, Expression v,
         out Expression baseExpr, out Expression expExpr)
     {
         baseExpr = null!; expExpr = null!;
         if (expr is Expression.Power p)
         {
-            // Check exponent is a negative integer
+            // (EN) Check exponent is a negative integer. (ZH) 检查指数是否为负整数。
             if (p.Exponent is Expression.Number ne && ne.Value.IsInteger && ne.Value.IsNegative)
             {
                 baseExpr = p.Base;
@@ -1215,7 +1473,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>If expr = a*v + b, return a. If expr = v, return 1. Otherwise null.</summary>
+    /// <summary>
+    /// (EN) If expr = a*v + b, return a. If expr = v, return 1. Otherwise null.
+    /// (ZH) 若 expr = a*v + b 则返回 a；若 expr = v 则返回 1；否则返回 null。
+    /// </summary>
     private static Expression? TryExtractLinearCoeff(Expression expr, Expression v)
     {
         if (expr is Expression.Sum sum && sum.Terms.Any(t => t.Equals(v) ||
@@ -1226,7 +1487,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                 if (t is Expression.Product prod && prod.Factors.Any(f => f.Equals(v)))
                 {
                     var others = prod.Factors.Where(f => !f.Equals(v)).ToList();
-                    return others.Count == 1 ? others[0] : new Expression.Product(others);
+                    var c = others.Count == 1 ? others[0] : new Expression.Product(others);
+                    // (EN) The coefficient must be variable-free. (ZH) 系数必须与变量无关。
+                    if (Structure.ContainsVariable(c, v)) return null;
+                    return c;
                 }
             }
             return One;
@@ -1234,14 +1498,24 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         if (expr is Expression.Product prod2 && prod2.Factors.Any(f => f.Equals(v)))
         {
             var others = prod2.Factors.Where(f => !f.Equals(v)).ToList();
-            return others.Count == 1 ? others[0] : new Expression.Product(others);
+            var c2 = others.Count == 1 ? others[0] : new Expression.Product(others);
+            // (EN) The coefficient must be variable-free. (ZH) 系数必须与变量无关。
+            if (Structure.ContainsVariable(c2, v)) return null;
+            return c2;
         }
         if (expr.Equals(v)) return One;
         return null;
     }
 
     // ── Internal helpers ──
+    // (EN) Miscellaneous utility methods used by the solver strategies.
+    // (ZH) 求解器策略使用的杂项工具方法。
 
+    /// <summary>
+    /// (EN) LIATE priority heuristic for integration by parts: Logarithmic &gt; InverseTrig &gt;
+    ///      Algebraic &gt; Trigonometric &gt; Exponential. Higher number = higher priority for u.
+    /// (ZH) 分部积分的 LIATE 优先级启发式：对数 &gt; 反三角 &gt; 代数 &gt; 三角 &gt; 指数。数字越大 u 的优先级越高。
+    /// </summary>
     private static int LiatePriority(Expression e, Expression v)
     {
         if (!Structure.ContainsVariable(e, v)) return -1;
@@ -1262,47 +1536,25 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         };
     }
 
-    private static Expression? DifferentiateApprox(Expression e, Expression v)
-    {
-        if (e.Equals(v)) return One;
-        if (e is Expression.Power pw && pw.Base.Equals(v))
-            return Multiply(pw.Exponent, Pow(v, Subtract(pw.Exponent, One)));
-        if (e is Expression.Product prod && prod.Factors.Any(f => f.Equals(v)))
-        {
-            var rest = prod.Factors.Where(f => !f.Equals(v)).ToList();
-            return rest.Count == 1 ? rest[0] : new Expression.Product(rest);
-        }
-        // Basic function derivatives
-        if (e is Expression.Function fn && fn.Argument.Equals(v))
-        {
-            return fn.Op switch
-            {
-                FunctionType.Ln => Divide(One, v),       // d/dx ln(x) = 1/x
-                FunctionType.Exp => Exp(v),               // d/dx e^x = e^x
-                FunctionType.Sin => Cos(v),               // d/dx sin(x) = cos(x)
-                FunctionType.Cos => Negate(Sin(v)),       // d/dx cos(x) = -sin(x)
-                FunctionType.Tan => One / (Cos(v) * Cos(v)), // sec^2(x)
-                FunctionType.Cot => Negate(One / (Sin(v) * Sin(v))), // -csc^2(x)
-                FunctionType.Sec => Sec(v) * Tan(v),
-                FunctionType.Csc => Negate(Csc(v) * Cot(v)),
-                FunctionType.Asin => One / Sqrt(One - v * v),
-                FunctionType.Acos => MinusOne / Sqrt(One - v * v),
-                FunctionType.Atan => One / (One + v * v),
-                FunctionType.Sinh => Cosh(v),
-                FunctionType.Cosh => Sinh(v),
-                _ => null,
-            };
-        }
-        return null;
-    }
-
+    /// <summary>
+    /// (EN) Walk the expression tree and collect candidate sub-expressions for u-substitution:
+    ///      function nodes f(g(x)) and their arguments g(x), plus power bases and exponents that
+    ///      depend on the integration variable.
+    /// (ZH) 遍历表达式树，收集适合换元积分的候选子表达式：函数节点 f(g(x)) 及其参数 g(x)，
+    ///      以及依赖积分变量的幂底数与指数。
+    /// </summary>
     private static List<Expression> CollectPotentialSubstitutions(Expression e, Expression v)
     {
         var set = new HashSet<Expression>();
         void Walk(Expression x)
         {
-            if (x is Expression.Function fn && Structure.ContainsVariable(fn.Argument, v)
-                && !fn.Argument.Equals(v)) set.Add(fn.Argument);
+            if (x is Expression.Function fn && Structure.ContainsVariable(fn.Argument, v))
+            {
+                // (EN) u = f(g(x)) itself (e.g. sin(x) in sin(x)·cos(x)). (ZH) u = f(g(x)) 本身（如 sin(x)·cos(x) 中的 sin(x)）。
+                set.Add(fn);
+                // (EN) u = g(x) when it is not just the bare variable (e.g. x² in exp(x²)). (ZH) 当 g(x) 不是裸变量时取 u = g(x)（如 exp(x²) 中的 x²）。
+                if (!fn.Argument.Equals(v)) set.Add(fn.Argument);
+            }
             if (x is Expression.Power pwr)
             {
                 if (Structure.ContainsVariable(pwr.Base, v) && !pwr.Base.Equals(v)) set.Add(pwr.Base);
@@ -1315,48 +1567,58 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return set.ToList();
     }
 
-    /// <summary>Extract a factor (or constant multiple) from expression. Returns (remaining, extractedCoeff) or null.</summary>
-    private static (Expression Remaining, Expression Coeff)? ExtractFactorWithCoeff(
-        Expression expr, Expression factor, Expression variable)
+    /// <summary>
+    /// (EN) Rewrites the integrand as F(u)·c·u' by cancelling each variable-dependent factor of the
+    ///      derivative u' against a matching factor of the integrand and folding the constant part of
+    ///      u' into c. Returns (F(u), c) or null when u' is not a factor of the integrand.
+    /// (ZH) 通过将导数 u' 的每个含变量因式与被积表达式的对应因式相消、并把 u' 的常数部分并入 c，
+    ///      把被积式写成 F(u)·c·u'。当 u' 不是被积式的因式时返回 null。
+    /// </summary>
+    private static (Expression Remaining, Expression Coeff)? FactorOutDerivative(
+        Expression integrand, Expression du, Expression variable)
     {
-        if (expr.Equals(factor)) return (One, One);
+        if (integrand.Equals(du)) return (One, One);
 
-        if (expr is Expression.Product p)
+        var integrandFactors = Algebraic.Factors(integrand).ToList();
+        var duFactors = Algebraic.Factors(du).ToList();
+        Expression coeff = One;
+
+        foreach (var df in duFactors)
         {
-            var remaining = new List<Expression>();
-            Expression? matchedCoeff = null;
-            bool found = false;
-            var (factorBase, factorCo) = DecomposeConstant(factor);
-
-            foreach (var f in p.Factors)
+            // (EN) Constant part of the derivative folds into the coefficient. (ZH) 导数的常数部分并入系数。
+            if (!Structure.ContainsVariable(df, variable))
             {
-                if (!found)
+                coeff = Multiply(coeff, Divide(One, df));
+                continue;
+            }
+
+            var (dfBase, dfCo) = DecomposeConstant(df);
+            int match = -1;
+            for (int i = 0; i < integrandFactors.Count; i++)
+            {
+                if (!Structure.ContainsVariable(integrandFactors[i], variable)) continue;
+                var (fBase, fCo) = DecomposeConstant(integrandFactors[i]);
+                if (fBase.Equals(dfBase))
                 {
-                    if (f.Equals(factor)) { found = true; matchedCoeff = One; continue; }
-                    // Check constant multiple
-                    var (fBase, fCo) = DecomposeConstant(f);
-                    if (factorBase.Equals(fBase))
-                    {
-                        found = true;
-                        matchedCoeff = Divide(fCo, factorCo);
-                        continue;
-                    }
+                    match = i;
+                    coeff = Multiply(coeff, Divide(fCo, dfCo));
+                    break;
                 }
-                remaining.Add(f);
             }
-
-            if (found)
-            {
-                var rem = remaining.Count == 0 ? One
-                    : remaining.Count == 1 ? remaining[0]
-                    : new Expression.Product(remaining);
-                return (rem, matchedCoeff ?? One);
-            }
+            if (match < 0) return null;
+            integrandFactors.RemoveAt(match);
         }
-        return null;
+
+        var remaining = integrandFactors.Count == 0 ? One
+            : integrandFactors.Count == 1 ? integrandFactors[0]
+            : new Expression.Product(integrandFactors);
+        return (remaining, coeff);
     }
 
-    /// <summary>If expr is coeff * something, return (something, coeff). Otherwise return expr with coeff=1.</summary>
+    /// <summary>
+    /// (EN) If expr is coeff * something, return (something, coeff). Otherwise return expr with coeff=1.
+    /// (ZH) 若表达式为 coeff * something，返回 (something, coeff)；否则返回 (expr, 1)。
+    /// </summary>
     private static (Expression Base, Expression Coeff) DecomposeConstant(Expression expr)
     {
         if (expr is Expression.Product prod)
@@ -1377,8 +1639,13 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
     }
 
     // ── Linear argument helpers ──
+    // (EN) Helpers for matching f(a·x + b) patterns and applying u-substitution.
+    // (ZH) 匹配 f(a·x + b) 模式并应用换元积分的辅助方法。
 
-    /// <summary>Match a function with direct variable argument.</summary>
+    /// <summary>
+    /// (EN) Match a function with direct variable argument.
+    /// (ZH) 匹配以变量为直接参数的函数。
+    /// </summary>
     private static IntegrationRule? MatchDirectTrig(Expression.Function f, Expression v)
     {
         return f.Op switch
@@ -1400,7 +1667,10 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         };
     }
 
-    /// <summary>Check if expr is a*var + b (linear in var).</summary>
+    /// <summary>
+    /// (EN) Check if expr is a*var + b (linear in var).
+    /// (ZH) 检查表达式是否为 a*var + b（关于 var 的线性形式）。
+    /// </summary>
     private static bool TryGetLinearCoeffs(Expression expr, Expression v,
         out Expression a, out Expression b)
     {
@@ -1435,18 +1705,21 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return false;
     }
 
-    /// <summary>Handle f(a*x+b) via u-substitution.</summary>
+    /// <summary>
+    /// (EN) Handle f(a*x+b) via u-substitution.
+    /// (ZH) 通过换元积分处理 f(a*x+b)。
+    /// </summary>
     private IntegrationRule? TryLinearFunctionRule(Expression.Function f,
         Expression coeffA, Expression coeffB, Expression v)
     {
-        // Build u = a*x + b
+        // (EN) Build u = a*x + b. (ZH) 构造 u = a*x + b。
         var uExpr = Expression.IsZero(coeffB)
             ? (Expression)Multiply(coeffA, v)
             : Add(Multiply(coeffA, v), coeffB);
 
-        // du/dx = a, so dx = du/a
+        // (EN) du/dx = a, so dx = du/a. (ZH) du/dx = a，因此 dx = du/a。
         var uVar = Symbol("__u__");
-        var fOfU = f with { Argument = uVar }; // create f(__u__)
+        var fOfU = f with { Argument = uVar }; // (EN) create f(__u__). (ZH) 创建 f(__u__)。
         var substep = Solve(fOfU, uVar);
         if (!substep.ContainsDontKnow)
         {
@@ -1455,7 +1728,7 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
                 Integrand = f, Variable = v,
                 UVar = uVar, UFunc = uExpr, Substeps = substep
             };
-            // Wrap with 1/a if a != 1
+            // (EN) Wrap with 1/a only when a != 1. (ZH) 仅当 a != 1 时用 1/a 包装。
             if (!Expression.IsOne(coeffA))
                 return new ConstantTimesRule
                 {
@@ -1467,6 +1740,13 @@ private bool TryMatchOwensT(Expression.Product prod, Expression v,
         return null;
     }
 
+    /// <summary>
+    /// (EN) Null-safe structural equality test between two expressions.
+    /// (ZH) 两个表达式之间空值安全的结构相等比较。
+    /// </summary>
+    /// <param name="a">(EN) Left expression (may be null). (ZH) 左表达式（可为 null）。</param>
+    /// <param name="b">(EN) Right expression. (ZH) 右表达式。</param>
+    /// <returns>(EN) True when <paramref name="a"/> is non-null and equals <paramref name="b"/>. (ZH) 当 <paramref name="a"/> 非空且等于 <paramref name="b"/> 时为 true。</returns>
     private static bool ExpressionEquals(Expression a, Expression b)
         => a is not null && a.Equals(b);
 }
