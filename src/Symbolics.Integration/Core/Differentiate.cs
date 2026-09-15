@@ -176,6 +176,9 @@ internal static class Differentiate
             FunctionType.Acos => Negate(Divide(One, Sqrt(One - Pow(u, Two)))),
             FunctionType.Atan => Divide(One, One + Pow(u, Two)),
             FunctionType.Acot => Negate(Divide(One, One + Pow(u, Two))),
+            // (EN) d/dx asec(u) = u'/(|u|·√(u²-1)), d/dx acsc(u) = -u'/(|u|·√(u²-1)). (ZH) 正割/余割的导数。
+            FunctionType.Asec => Divide(One, Multiply(Abs(u), Sqrt(Pow(u, Two) - One))),
+            FunctionType.Acsc => Negate(Divide(One, Multiply(Abs(u), Sqrt(Pow(u, Two) - One)))),
 
             // (EN) Hyperbolic. (ZH) 双曲函数。
             FunctionType.Sinh => Cosh(u),
@@ -206,6 +209,11 @@ internal static class Differentiate
             // (EN) Fresnel integrals. (ZH) 菲涅耳积分。
             FunctionType.FresnelS => Sin(Multiply(Divide(Pi, Two), Pow(u, Two))),
             FunctionType.FresnelC => Cos(Multiply(Divide(Pi, Two), Pow(u, Two))),
+
+            // (EN) Distributional derivatives: H′(u) = δ(u), δ′(u) = δ⁽¹⁾(u). (ZH) 分布导数：H′(u) = δ(u)，δ′(u) = δ⁽¹⁾(u)。
+            FunctionType.Heaviside => new Expression.Function(FunctionType.DiracDelta, u),
+            FunctionType.DiracDelta => new Expression.FunctionN(FunctionNType.DiracDelta,
+                new[] { u, Expression.Int32(1) }),
 
             _ => null,
         };

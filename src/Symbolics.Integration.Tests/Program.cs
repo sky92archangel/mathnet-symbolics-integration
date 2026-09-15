@@ -977,6 +977,529 @@ Run("(x+1)/(x^2+1) (expand)", () => {
     Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
 });
 
+// ── Large-exponent robustness (no overflow / no stack overflow) ──
+// (EN) Regression tests for the review findings: large binomial coefficients must not overflow,
+//      and huge exponents must be declined gracefully.
+// (ZH) 针对评审发现的回归测试：大二项式系数不得溢出，超大指数应被优雅拒绝。
+
+// (EN) ∫ tan^68(x)·sec(x) dx — the binomial coefficient C(34,17) exceeds Int32 range.
+// (ZH) ∫ tan^68(x)·sec(x) dx —— 二项式系数 C(34,17) 超出 Int32 范围。
+Run("tan(x)^68*sec(x) no overflow", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Power(Tan(x), Expression.Int32(68)) * Sec(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ tan⁶⁸(x)·sec(x) dx length = {r.ToString().Length}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sin^100000(x) dx — above the exponent cap, must return DontKnow instead of crashing.
+// (ZH) ∫ sin^100000(x) dx —— 超过指数上限，应返回 DontKnow 而非崩溃。
+Run("sin(x)^100000 declined", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Power(Sin(x), Expression.Int32(100000));
+    var steps = Integrate.Steps(expr, x);
+    Console.WriteLine($"    ∫ sin^100000(x) dx steps = {steps.GetType().Name}");
+    Assert(steps.ContainsDontKnow);
+});
+
+// ── Rational / affine / quadratic / product-to-sum / cyclic / log-power ──
+// (EN) Regression tests for the linear-coefficient and quadratic-extraction bugs plus the new
+//      affine-power, quadratic-denominator, polynomial-division, product-to-sum, cyclic-parts and
+//      log-power capabilities.
+// (ZH) 线性系数与二次提取 Bug 的回归测试，以及新增的仿射幂、二次分母、多项式除法、积化和差、
+//      循环分部与对数幂能力的测试。
+
+// (EN) ∫ 1/(x²+x+1) dx = (2/√3)·atan((2x+1)/√3) — must not be a lone logarithm (Bug 1).
+// (ZH) ∫ 1/(x²+x+1) dx = (2/√3)·atan((2x+1)/√3) —— 不得是单个对数（Bug 1）。
+Run("1/(x^2+x+1) atan (Bug1)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (x*x + x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x²+x+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+    Assert(r.ToString().Contains("atan"));
+});
+
+// (EN) ∫ √(x+1) dx = (2/3)(x+1)^(3/2) — must be finite (Bug 2, no ∞).
+// (ZH) ∫ √(x+1) dx = (2/3)(x+1)^(3/2) —— 必须有限（Bug 2，无 ∞）。
+Run("sqrt(x+1) finite (Bug2)", () => {
+    var x = Symbol("x");
+    var expr = Sqrt(x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ √(x+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+    Assert(!r.ToString().Contains("∞") && !r.ToString().Contains("Infinity"));
+});
+
+// (EN) ∫ (2x+1)^-2 dx = -1/(2(2x+1)) — affine power with coefficient.
+// (ZH) ∫ (2x+1)^-2 dx = -1/(2(2x+1)) —— 带系数的仿射幂。
+Run("(2x+1)^-2 (affine pow)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Power(2*x + 1, Expression.Int32(-2));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (2x+1)⁻² dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ (2x+1)/(x²+x+1) dx = ln(x²+x+1) — quadratic denominator via the rational part.
+// (ZH) ∫ (2x+1)/(x²+x+1) dx = ln(x²+x+1) —— 二次分母的有理部分。
+Run("(2x+1)/(x^2+x+1)", () => {
+    var x = Symbol("x");
+    var expr = (2*x + 1) / (x*x + x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (2x+1)/(x²+x+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(2x²+3x+4) dx — irrational roots, arctangent branch.
+// (ZH) ∫ 1/(2x²+3x+4) dx —— 复根，反正切分支。
+Run("1/(2x^2+3x+4)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (2*x*x + 3*x + 4);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(2x²+3x+4) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x²/(1+x²) dx = x - atan(x) — polynomial long division.
+// (ZH) ∫ x²/(1+x²) dx = x - atan(x) —— 多项式长除法。
+Run("x^2/(1+x^2) division", () => {
+    var x = Symbol("x");
+    var expr = x*x / (1 + x*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x²/(1+x²) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x·atan(x) dx — parts plus polynomial division.
+// (ZH) ∫ x·atan(x) dx —— 分部积分配合多项式除法。
+Run("x*atan(x)", () => {
+    var x = Symbol("x");
+    var expr = x * Atan(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x·atan(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sin(3x)·cos(2x) dx — trigonometric product-to-sum.
+// (ZH) ∫ sin(3x)·cos(2x) dx —— 三角积化和差。
+Run("sin(3x)*cos(2x)", () => {
+    var x = Symbol("x");
+    var expr = Sin(3*x) * Cos(2*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ sin(3x)·cos(2x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ eˣ·sin(x) dx = eˣ(sin x - cos x)/2 — cyclic integration by parts.
+// (ZH) ∫ eˣ·sin(x) dx = eˣ(sin x - cos x)/2 —— 循环分部积分。
+Run("exp(x)*sin(x) cyclic", () => {
+    var x = Symbol("x");
+    var expr = Exp(x) * Sin(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ eˣ·sin(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ ln²(x) dx = x·ln²x - 2x·lnx + 2x — log-power via repeated parts.
+// (ZH) ∫ ln²(x) dx = x·ln²x - 2x·lnx + 2x —— 对数幂的重复分部积分。
+Run("ln(x)^2", () => {
+    var x = Symbol("x");
+    var expr = Ln(x) * Ln(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ ln²(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x·ln²(x) dx — polynomial times log-power.
+// (ZH) ∫ x·ln²(x) dx —— 多项式乘对数幂。
+Run("x*ln(x)^2", () => {
+    var x = Symbol("x");
+    var expr = x * Ln(x) * Ln(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x·ln²(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// ── Partial fractions & Weierstrass ──
+// (EN) Tests for full rational-function integration (repeated/irreducible factors) and the
+//      Weierstrass substitution for rational functions of sin/cos.
+// (ZH) 通用有理函数积分（重根/不可约因子）与 sin/cos 有理函数的 Weierstrass 代换测试。
+
+// (EN) ∫ 1/(x²+1)² dx = x/(2(1+x²)) + atan(x)/2 — repeated irreducible quadratic.
+// (ZH) ∫ 1/(x²+1)² dx = x/(2(1+x²)) + atan(x)/2 —— 重复不可约二次。
+Run("1/(x^2+1)^2 (partial fractions)", () => {
+    var x = Symbol("x");
+    var expr = 1 / ((x*x + 1) * (x*x + 1));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x²+1)² dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(x(x+1)²) dx = ln(x) - ln(x+1) + 1/(x+1) — repeated linear factor.
+// (ZH) ∫ 1/(x(x+1)²) dx = ln(x) - ln(x+1) + 1/(x+1) —— 重复线性因子。
+Run("1/(x(x+1)^2)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (x * (x + 1) * (x + 1));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x(x+1)²) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(x³-1) dx — linear + irreducible quadratic factors.
+// (ZH) ∫ 1/(x³-1) dx —— 线性 + 不可约二次因子。
+Run("1/(x^3-1)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (x*x*x - 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x³-1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ atan(x)/x² dx = -atan(x)/x + ln(x) - ln(1+x²)/2 — parts plus partial fractions.
+// (ZH) ∫ atan(x)/x² dx = -atan(x)/x + ln(x) - ln(1+x²)/2 —— 分部积分配合部分分式。
+Run("atan(x)/x^2", () => {
+    var x = Symbol("x");
+    var expr = Atan(x) / (x*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ atan(x)/x² dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(x(x²+1)) dx = ln(x) - ln(1+x²)/2 — mixed linear + quadratic.
+// (ZH) ∫ 1/(x(x²+1)) dx = ln(x) - ln(1+x²)/2 —— 线性与二次混合。
+Run("1/(x(x^2+1))", () => {
+    var x = Symbol("x");
+    var expr = 1 / (x * (x*x + 1));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x(x²+1)) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(2+cos x) dx — Weierstrass substitution.
+// (ZH) ∫ 1/(2+cos x) dx —— Weierstrass 代换。
+Run("1/(2+cos(x)) (Weierstrass)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (2 + Cos(x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(2+cos x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(3+5cos x) dx — Weierstrass with distinct poles.
+// (ZH) ∫ 1/(3+5cos x) dx —— 具有不同极点的 Weierstrass。
+Run("1/(3+5cos(x)) (Weierstrass)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (3 + 5*Cos(x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(3+5cos x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// ── Exp / sqrt / trig substitutions & inverse-secant ──
+// (EN) Tests for t = e^x, t = √x and x = sin θ substitutions, and the asec/acsc closed forms.
+// (ZH) t = e^x、t = √x、x = sin θ 换元，以及 asec/acsc 闭式的测试。
+
+// (EN) ∫ eˣ/(1+e^(2x)) dx = atan(eˣ) — exponential substitution.
+// (ZH) ∫ eˣ/(1+e^(2x)) dx = atan(eˣ) —— 指数换元。
+Run("exp(x)/(1+exp(2x))", () => {
+    var x = Symbol("x");
+    var expr = Exp(x) / (1 + Exp(2*x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ eˣ/(1+e^(2x)) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ e^(2x)/(1+eˣ) dx = eˣ - ln(1+eˣ) — exponential substitution.
+// (ZH) ∫ e^(2x)/(1+eˣ) dx = eˣ - ln(1+eˣ) —— 指数换元。
+Run("exp(2x)/(1+exp(x))", () => {
+    var x = Symbol("x");
+    var expr = Exp(2*x) / (1 + Exp(x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ e^(2x)/(1+eˣ) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(1+√x) dx = 2√x - 2·ln(1+√x) — square-root substitution.
+// (ZH) ∫ 1/(1+√x) dx = 2√x - 2·ln(1+√x) —— 根式换元。
+Run("1/(1+sqrt(x))", () => {
+    var x = Symbol("x");
+    var expr = 1 / (1 + Sqrt(x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(1+√x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(√x·(1+x)) dx = 2·atan(√x) — square-root substitution.
+// (ZH) ∫ 1/(√x·(1+x)) dx = 2·atan(√x) —— 根式换元。
+Run("1/(sqrt(x)(1+x))", () => {
+    var x = Symbol("x");
+    var expr = 1 / (Sqrt(x) * (1 + x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(√x(1+x)) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x²/√(1-x²) dx — trigonometric substitution x = sin θ.
+// (ZH) ∫ x²/√(1-x²) dx —— 三角换元 x = sin θ。
+Run("x^2/sqrt(1-x^2)", () => {
+    var x = Symbol("x");
+    var expr = x*x / Sqrt(1 - x*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x²/√(1-x²) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x/√(1-x²) dx = -√(1-x²) — trigonometric substitution.
+// (ZH) ∫ x/√(1-x²) dx = -√(1-x²) —— 三角换元。
+Run("x/sqrt(1-x^2)", () => {
+    var x = Symbol("x");
+    var expr = x / Sqrt(1 - x*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x/√(1-x²) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ asec(x) dx = x·asec(x) - ln(x+√(x²-1)) — inverse-secant closed form.
+// (ZH) ∫ asec(x) dx = x·asec(x) - ln(x+√(x²-1)) —— 反正割闭式。
+Run("asec(x)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Function(FunctionType.Asec, x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ asec(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ acsc(x) dx = x·acsc(x) + ln(x+√(x²-1)) — inverse-cosecant closed form.
+// (ZH) ∫ acsc(x) dx = x·acsc(x) + ln(x+√(x²-1)) —— 反余割闭式。
+Run("acsc(x)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Function(FunctionType.Acsc, x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ acsc(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// ── √(1+x²)/√(x²−1) substitutions, fractional-linear √, rational trig ──
+// (EN) Tests for the tan/sec trigonometric substitutions, the fractional-linear square-root
+//      rationalisation and sin/cos rationals needing GCD reduction.
+// (ZH) tan/sec 三角换元、根式线性有理化，以及需要 GCD 约分的 sin/cos 有理式测试。
+
+// (EN) ∫ 1/(1+x²)^(3/2) dx = x/√(1+x²) — x = tan θ substitution.
+// (ZH) ∫ 1/(1+x²)^(3/2) dx = x/√(1+x²) —— x = tan θ 换元。
+Run("1/(1+x^2)^(3/2)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Power(1 + x*x, new Expression.Number(new Rational(-3, 2)));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(1+x²)^(3/2) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x²/√(1+x²) dx — x = tan θ substitution.
+// (ZH) ∫ x²/√(1+x²) dx —— x = tan θ 换元。
+Run("x^2/sqrt(1+x^2)", () => {
+    var x = Symbol("x");
+    var expr = x*x / Sqrt(1 + x*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x²/√(1+x²) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x²/√(x²−1) dx — x = sec θ substitution.
+// (ZH) ∫ x²/√(x²−1) dx —— x = sec θ 换元。
+Run("x^2/sqrt(x^2-1)", () => {
+    var x = Symbol("x");
+    var expr = x*x / Sqrt(x*x - 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x²/√(x²−1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ √((x+1)/(x−1)) dx — fractional-linear square-root rationalisation.
+// (ZH) ∫ √((x+1)/(x−1)) dx —— 根式线性有理化。
+Run("sqrt((x+1)/(x-1))", () => {
+    var x = Symbol("x");
+    var expr = Sqrt((x + 1) / (x - 1));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ √((x+1)/(x−1)) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/√((x+1)/(x−1)) dx — fractional-linear with exponent -1/2.
+// (ZH) ∫ 1/√((x+1)/(x−1)) dx —— 指数为 -1/2 的根式线性。
+Run("1/sqrt((x+1)/(x-1))", () => {
+    var x = Symbol("x");
+    var expr = 1 / Sqrt((x + 1) / (x - 1));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/√((x+1)/(x−1)) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sin²(x)/cos³(x) dx — sin/cos rational needing polynomial GCD reduction.
+// (ZH) ∫ sin²(x)/cos³(x) dx —— 需要多项式 GCD 约分的 sin/cos 有理式。
+Run("sin(x)^2/cos(x)^3", () => {
+    var x = Symbol("x");
+    var expr = Sin(x)*Sin(x) / (Cos(x)*Cos(x)*Cos(x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ sin²(x)/cos³(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// ── Euler / Chebyshev substitutions & √(quadratic)-denominator ──
+// (EN) Tests for the Euler substitution (general √(quadratic)), Chebyshev substitution (binomial
+//      differentials) and the linear-over-√(quadratic) rule.
+// (ZH) Euler 代换（一般 √(二次式)）、切比雪夫代换（二项微分）与「线性/√(二次式)」规则的测试。
+
+// (EN) ∫ x/√(x²+x+1) dx — Euler substitution with a non-zero linear term.
+// (ZH) ∫ x/√(x²+x+1) dx —— 含一次项的 Euler 代换。
+Run("x/sqrt(x^2+x+1)", () => {
+    var x = Symbol("x");
+    var expr = x / Sqrt(x*x + x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x/√(x²+x+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(x·√(x²+1)) dx — Euler substitution.
+// (ZH) ∫ 1/(x·√(x²+1)) dx —— Euler 代换。
+Run("1/(x*sqrt(x^2+1))", () => {
+    var x = Symbol("x");
+    var expr = 1 / (x * Sqrt(x*x + 1));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x·√(x²+1)) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x²·(1+x³)^(-2/3) dx = (1+x³)^(1/3) — Chebyshev case 2.
+// (ZH) ∫ x²·(1+x³)^(-2/3) dx = (1+x³)^(1/3) —— 切比雪夫情形 2。
+Run("x^2*(1+x^3)^(-2/3)", () => {
+    var x = Symbol("x");
+    var expr = x*x * new Expression.Power(1 + x*x*x, new Expression.Number(new Rational(-2, 3)));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x²·(1+x³)^(-2/3) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x⁻¹·(1+x³)^(-1/3) dx — Chebyshev case 3.
+// (ZH) ∫ x⁻¹·(1+x³)^(-1/3) dx —— 切比雪夫情形 3。
+Run("x^-1*(1+x^3)^(-1/3)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Power(x, Expression.Int32(-1))
+        * new Expression.Power(1 + x*x*x, new Expression.Number(new Rational(-1, 3)));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x⁻¹·(1+x³)^(-1/3) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ (2x+1)/√(x²+1) dx = 2√(x²+1) + ln(2x+2√(x²+1)) — linear over √(quadratic).
+// (ZH) ∫ (2x+1)/√(x²+1) dx = 2√(x²+1) + ln(2x+2√(x²+1)) —— 线性/√(二次式)。
+Run("(2x+1)/sqrt(x^2+1)", () => {
+    var x = Symbol("x");
+    var expr = (2*x + 1) / Sqrt(x*x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (2x+1)/√(x²+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ (x+1)/√(x²+x+1) dx — linear over a general √(quadratic).
+// (ZH) ∫ (x+1)/√(x²+x+1) dx —— 一般 √(二次式) 上的线性分子。
+Run("(x+1)/sqrt(x^2+x+1)", () => {
+    var x = Symbol("x");
+    var expr = (x + 1) / Sqrt(x*x + x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (x+1)/√(x²+x+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// ── Heaviside / Dirac delta distributions ──
+// (EN) Tests for the distributional rules: ∫δ⁽ⁿ⁾(a+bx) dx and ∫Heaviside(mx+b)·g(x) dx.
+// (ZH) 分布规则测试：∫δ⁽ⁿ⁾(a+bx) dx 与 ∫Heaviside(mx+b)·g(x) dx。
+
+// (EN) ∫ δ(x) dx = Heaviside(x).
+// (ZH) ∫ δ(x) dx = Heaviside(x)。
+Run("DiracDelta(x)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Function(FunctionType.DiracDelta, x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ δ(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+    Assert(!r.ToString().Contains("DontKnow"));
+});
+
+// (EN) ∫ δ(2x−1) dx = Heaviside(2x−1)/2.
+// (ZH) ∫ δ(2x−1) dx = Heaviside(2x−1)/2。
+Run("DiracDelta(2x-1)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Function(FunctionType.DiracDelta, 2*x - 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ δ(2x−1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ δ⁽¹⁾(x) dx = δ(x).
+// (ZH) ∫ δ⁽¹⁾(x) dx = δ(x)。
+Run("DiracDelta(x,1)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.FunctionN(FunctionNType.DiracDelta, new[] { x, Expression.Int32(1) });
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ δ⁽¹⁾(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ Heaviside(x) dx = Heaviside(x)·x.
+// (ZH) ∫ Heaviside(x) dx = Heaviside(x)·x。
+Run("Heaviside(x)", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Function(FunctionType.Heaviside, x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ H(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ Heaviside(x−1)·x dx — step times a co-factor.
+// (ZH) ∫ Heaviside(x−1)·x dx —— 阶跃乘以余因子。
+Run("Heaviside(x-1)*x", () => {
+    var x = Symbol("x");
+    var expr = new Expression.Function(FunctionType.Heaviside, x - 1) * x;
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ H(x−1)·x dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// ── Irrational-root quadratics & previously-unsolved cases ──
+// (EN) Tests for rational denominators with irrational real roots and the Euler-reduced integral.
+// (ZH) 含无理实根的有理分母，以及经 Euler 约化后的积分的测试。
+
+// (EN) ∫ 1/(x²+x−1) dx — quadratic denominator with irrational real roots.
+// (ZH) ∫ 1/(x²+x−1) dx —— 无理实根的二次分母。
+Run("1/(x^2+x-1)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (x*x + x - 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x²+x−1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/((x+1)·√(x²+1)) dx — Euler substitution reducing to an irrational-root quadratic.
+// (ZH) ∫ 1/((x+1)·√(x²+1)) dx —— Euler 代换约化为无理根二次式。
+Run("1/((x+1)sqrt(x^2+1))", () => {
+    var x = Symbol("x");
+    var expr = 1 / ((x + 1) * Sqrt(x*x + 1));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/((x+1)·√(x²+1)) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(sin x + cos x) dx — Weierstrass reducing to an irrational-root quadratic.
+// (ZH) ∫ 1/(sin x + cos x) dx —— Weierstrass 约化为无理根二次式。
+Run("1/(sin(x)+cos(x))", () => {
+    var x = Symbol("x");
+    var expr = 1 / (Sin(x) + Cos(x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(sin x+cos x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
 Console.WriteLine($"\n=== Result: {passed} passed, {failed} failed ===");
 
 // (EN) Minimal assertion helper: throws when the condition is false so that the

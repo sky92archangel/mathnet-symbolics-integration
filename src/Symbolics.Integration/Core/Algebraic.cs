@@ -22,6 +22,14 @@ public static class Algebraic
         expr is Expression.Product p ? p.Factors : new[] { expr };
 
     /// <summary>
+    /// (EN) Splits an expression into (base, exponent): a Power yields its parts, anything else is
+    ///      treated as a first power.
+    /// (ZH) 将表达式拆成 (底, 指数)：幂返回其底与指数，其它表达式视为一次幂。
+    /// </summary>
+    public static (Expression Base, Expression Exp) AsPower(Expression e) =>
+        e is Expression.Power p ? (p.Base, p.Exponent) : (e, Operators.One);
+
+    /// <summary>
     /// (EN) Expand a product of sums: (a+b)*(c+d) → a*c + a*d + b*c + b*d.
     ///      Only the top level; does not recurse.
     /// (ZH) 展开和的乘积：(a+b)*(c+d) → a*c + a*d + b*c + b*d。仅展开顶层，不递归。

@@ -235,6 +235,16 @@ public enum FunctionType
     /// (ZH) 第二类 Airy 函数的导数 Bi′(x)。
     /// </summary>
     AiryBiPrime,
+    /// <summary>
+    /// (EN) Heaviside step function H(x): 0 for x &lt; 0 and 1 for x &gt; 0 (distribution).
+    /// (ZH) Heaviside 阶跃函数 H(x)：x &lt; 0 时为 0，x &gt; 0 时为 1（分布意义）。
+    /// </summary>
+    Heaviside,
+    /// <summary>
+    /// (EN) Dirac delta δ(x), the distributional derivative of Heaviside (order 0).
+    /// (ZH) Dirac δ 函数 δ(x)，Heaviside 的分布意义导数（0 阶）。
+    /// </summary>
+    DiracDelta,
 }
 
 /// <summary>
@@ -360,6 +370,11 @@ public enum FunctionNType
     /// (ZH) 第二类 Hankel 函数 H⁽²⁾_ν(x) = J_ν(x) − i·Y_ν(x)；参数为 [阶 ν, x]。
     /// </summary>
     HankelH2,
+    /// <summary>
+    /// (EN) Dirac delta of order n: δ⁽ⁿ⁾(a+b·x) as a distribution; args = [a+b·x, n] with n a positive integer.
+    /// (ZH) n 阶 Dirac δ 函数 δ⁽ⁿ⁾(a+b·x)（分布意义）；参数为 [a+b·x, n]，n 为正整数。
+    /// </summary>
+    DiracDelta,
 }
 
 /// <summary>

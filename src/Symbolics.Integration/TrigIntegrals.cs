@@ -22,6 +22,13 @@ namespace MathNet.Symbolics.Integration;
 internal static class TrigIntegrals
 {
     /// <summary>
+    /// (EN) Largest supported exponent per function. Bounds the reduction recursion depth (and thus
+    ///      the stack) while still covering every practical integrand.
+    /// (ZH) 每个函数支持的最大指数。它同时限制递推深度（即栈深度），仍足以覆盖所有实用被积式。
+    /// </summary>
+    private const int MaxExponent = 100;
+
+    /// <summary>
     /// (EN) Tries to integrate an expression made only of a constant factor and integer powers of a
     ///      single trig/hyperbolic family applied to the integration variable.
     /// (ZH) 尝试积分仅由常数因子与某个单一三角/双曲函数族的整数次幂（自变量为积分变量）构成的表达式。
@@ -46,16 +53,21 @@ internal static class TrigIntegrals
                 continue;
             }
 
-            var (bas, exp) = AsPower(f);
+            var (bas, exp) = Algebraic.AsPower(f);
             if (bas is not Expression.Function fn || !fn.Argument.Equals(x)) return false;
             if (exp is not Expression.Number { Value: var r } || !r.IsInteger || r.Numerator < 0) return false;
+            // (EN) Cap the exponent: the reduction routines recurse O(exponent) deep, so unbounded
+            //      exponents would overflow the stack. (ZH) 限制指数：递推深度与指数同阶，指数过大将导致栈溢出。
+            if (r.Numerator > MaxExponent) return false;
 
             var fam = FamilyOf(fn.Op);
             if (fam == Family.None) return false;
             if (family == Family.None) family = fam;
             else if (family != fam) return false;
 
-            exps[fn.Op] = exps.GetValueOrDefault(fn.Op) + r.ToInt32();
+            int e = exps.GetValueOrDefault(fn.Op) + r.ToInt32();
+            if (e > MaxExponent) return false;
+            exps[fn.Op] = e;
         }
 
         if (family == Family.None) return false;
@@ -101,12 +113,6 @@ internal static class TrigIntegrals
         FunctionType.Coth or FunctionType.Csch => Family.CothCsch,
         _ => Family.None,
     };
-
-    /// <summary>
-    /// (EN) Splits e into (base, exponent); non-powers count as exponent 1. (ZH) 将 e 拆为 (底, 指数)；非幂视为一次幂。
-    /// </summary>
-    private static (Expression Base, Expression Exp) AsPower(Expression e) =>
-        e is Expression.Power p ? (p.Base, p.Exponent) : (e, One);
 
     // ── sin^m·cos^n ──────────────────────────────────────────────
 
@@ -208,8 +214,9 @@ internal static class TrigIntegrals
         int h = m / 2;
         for (int j = 0; j <= h; j++)
         {
-            int c = (int)(Comb(h, j) * (BigInteger)(((h - j) % 2 == 0) ? 1 : -1));
-            sum = Add(sum, Multiply(c, SecReduce(n + 2 * j, x)));
+            var c = Comb(h, j);
+            if ((h - j) % 2 == 1) c = -c;
+            sum = Add(sum, Multiply(Expression.Integer(c), SecReduce(n + 2 * j, x)));
         }
         return sum;
     }
@@ -244,8 +251,9 @@ internal static class TrigIntegrals
         int h = m / 2;
         for (int j = 0; j <= h; j++)
         {
-            int c = (int)(Comb(h, j) * (BigInteger)(((h - j) % 2 == 0) ? 1 : -1));
-            sum = Add(sum, Multiply(c, CscReduce(n + 2 * j, x)));
+            var c = Comb(h, j);
+            if ((h - j) % 2 == 1) c = -c;
+            sum = Add(sum, Multiply(Expression.Integer(c), CscReduce(n + 2 * j, x)));
         }
         return sum;
     }
@@ -279,8 +287,9 @@ internal static class TrigIntegrals
         int h = m / 2;
         for (int j = 0; j <= h; j++)
         {
-            int c = (int)(Comb(h, j) * (BigInteger)((j % 2 == 0) ? 1 : -1));
-            sum = Add(sum, Multiply(c, SechReduce(n + 2 * j, x)));
+            var c = Comb(h, j);
+            if (j % 2 == 1) c = -c;
+            sum = Add(sum, Multiply(Expression.Integer(c), SechReduce(n + 2 * j, x)));
         }
         return sum;
     }

@@ -85,6 +85,23 @@ IntegrationRule steps = Integrate.Steps(x*Cos(x), x);
 | **Linear args** | `f(ax+b)` automatic detection |
 | **Quadratic sqrt** | `1/√(ax²+bx+c)`, `√(ax²+bx+c)`, `1/(a+bx²)` (real branch for opposite-sign denominators) |
 | **Trig/hyp powers** | `sin^m cos^n`, `tan^m sec^n`, `cot^m csc^n`, `sinh^m cosh^n`, `tanh^m sech^n`, `coth^m csch^n` |
+| **Affine power** | `∫(a+b·x)^n dx` for any constant n (incl. `√(a+bx)`, `(a+bx)^(3/2)`, `(a+bx)^-2`) |
+| **Quadratic denom** | `∫(p·x+q)/(a·x²+b·x+c) dx` (atan / double-root / log branches by discriminant) |
+| **Polynomial division** | Improper rationals reduced, e.g. `x²/(1+x²) = 1 − 1/(1+x²)` |
+| **Partial fractions** | Repeated linear, irreducible-quadratic and irrational-real-root quadratic factors, with polynomial-GCD reduction (e.g. `1/(x(x+1)²)`, `1/(x²+1)²`, `1/(x²+x−1)`) |
+| **Weierstrass** | Rational functions of `sin(x)`/`cos(x)` via `t = tan(x/2)` |
+| **Exp substitution** | Rational functions of `e^(k·x)` via `t = eˣ` (e.g. `eˣ/(1+e^(2x))`) |
+| **Sqrt substitution** | Rational functions of `x` and `√x` via `t = √x` (e.g. `1/(1+√x)`, `1/(√x(1+x))`) |
+| **Trig substitution** | `x = sin θ` for `√(1-x²)`, `x = tan θ` for `√(1+x²)`, `x = sec θ` for `√(x²-1)` |
+| **Fractional-linear √** | `√((a·x+b)/(c·x+d))` rationalisation (incl. `(·)^(m/2)` exponents) |
+| **Euler substitution** | Rationals in `x` and `√(a+b·x+c·x²)` via `u = √R + √a·x` / `u = √R + √c·x` |
+| **Chebyshev substitution** | Binomial differentials `c·x^m·(a+b·x^n)^p` (p, (m+1)/n, or (m+1)/n+p integer) |
+| **√-quadratic denom** | `∫(p·x+q)/√(a+b·x+c·x²) dx` |
+| **Distributions** | `∫δ⁽ⁿ⁾(a+b·x) dx` (= Heaviside/δ), `∫Heaviside(m·x+b)·g(x) dx` |
+| **Inverse secant** | `∫asec(x) dx`, `∫acsc(x) dx` |
+| **Trig product-to-sum** | `sin(A)cos(B)`, `sin(A)sin(B)`, `cos(A)cos(B)` with different linear arguments |
+| **Cyclic parts** | `∫e^(ax)·sin(bx) dx`, `∫e^(ax)·cos(bx) dx` |
+| **Log powers** | `∫lnⁿ(x) dx`, `∫x·lnⁿ(x) dx` via repeated parts |
 | **Expansion** | `(poly)^n` and products of sums expanded, like terms collected |
 | **Special funcs** | Erf, FresnelS/C, Si, Ci, Shi, Chi, Ei, Li, **Polylog**, **UpperGamma** |
 | **Elliptic** | **EllipticF** (1st kind), **EllipticE** (2nd kind) |
@@ -117,16 +134,18 @@ src/
     IntegrationRule.cs        — Rule hierarchy (~40 rule classes)
     IntegrationSolver.cs      — Recursive solver with strategy ordering
     TrigIntegrals.cs          — Integer powers/products of trig & hyperbolic functions
+    RationalIntegrator.cs     — Partial-fraction integration of rational functions
     Core/
       Expression.cs           — Symbolic expression types + ToString
       Operators.cs            — Arithmetic + Simplify
       Differentiate.cs        — General symbolic differentiation (chain/product rules)
+      Polynomial.cs           — Rational-coefficient polynomial arithmetic
       FunctionType.cs         — Function enums
       Rational.cs             — Exact rational arithmetic
       Structure.cs            — Tree traversal utilities
       Algebraic.cs            — Summand/Factor decomposition
   Symbolics.Integration.Tests/
-    Program.cs                — 92 integration tests
+    Program.cs                — 140 integration tests
 ```
 
 ## Build

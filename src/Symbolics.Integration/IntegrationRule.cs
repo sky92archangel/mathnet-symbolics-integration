@@ -773,44 +773,156 @@ public sealed record ArctanRule : AtomicRule
 }
 
 /// <summary>
-/// (EN) Rule for a nested power ∫ (c·(a+b·x)^d)^e dx; it currently assumes a = 0 and b = 1, so it
-/// reduces to the plain power rule applied to <c>BaseVal</c>.
-/// (ZH) 嵌套幂 ∫ (c·(a+b·x)^d)^e dx 的规则；目前假定 a = 0、b = 1，因而退化为对 <c>BaseVal</c>
-/// 直接应用幂规则。
+/// (EN) Rule for an affine power ∫ (a+b·x)^n dx = (a+bx)^(n+1)/(b·(n+1)) for n ≠ -1, and
+///      ∫ (a+bx)^-1 dx = ln(a+bx)/b.
+/// (ZH) 仿射幂规则：n ≠ -1 时 ∫ (a+b·x)^n dx = (a+bx)^(n+1)/(b·(n+1))；∫ (a+bx)^-1 dx = ln(a+bx)/b。
 /// </summary>
-public sealed record NestedPowRule : AtomicRule
+public sealed record AffinePowRule : AtomicRule
 {
     /// <summary>
-    /// (EN) Base expression (a+b·x).
-    /// (ZH) 底表达式 (a+b·x)。
+    /// (EN) The affine base (a+b·x).
+    /// (ZH) 仿射底 (a+b·x)。
     /// </summary>
-    public required Expression BaseVal { get; init; }
+    public required Expression Base { get; init; }
 
     /// <summary>
-    /// (EN) Inner exponent.
-    /// (ZH) 内层指数。
+    /// (EN) Coefficient b of the variable inside the base.
+    /// (ZH) 底中变量的一次项系数 b。
     /// </summary>
-    public required Expression InnerExp { get; init; }
+    public required Expression Coeff { get; init; }
 
     /// <summary>
-    /// (EN) Outer exponent.
-    /// (ZH) 外层指数。
+    /// (EN) The exponent n.
+    /// (ZH) 指数 n。
     /// </summary>
-    public required Expression OuterExp { get; init; }
+    public required Expression Exponent { get; init; }
 
     /// <summary>
-    /// (EN) Returns ln(BaseVal) when n = -1, otherwise BaseVal^(n+1)/(n+1) with n the outer exponent.
-    /// (ZH) 当 n = -1 时返回 ln(BaseVal)，否则返回 BaseVal^(n+1)/(n+1)，其中 n 为外层指数。
+    /// (EN) Returns ln(Base)/b when n = -1, otherwise Base^(n+1)/(b·(n+1)).
+    /// (ZH) 当 n = -1 时返回 ln(Base)/b，否则返回 Base^(n+1)/(b·(n+1))。
     /// </summary>
     public override Expression Eval()
     {
-        // (EN) ∫ (a+bx)^n dx = (a+bx)^(n+1) / (b*(n+1)). (ZH) ∫ (a+bx)^n dx = (a+bx)^(n+1) / (b*(n+1))。
-        // (EN) For now assume a=0, b=1, so it's just PowerRule. (ZH) 目前假定 a=0, b=1，因此退化为 PowerRule。
-        var n = OuterExp;
+        var n = Exponent;
         if (Expression.IsMinusOne(n))
-            return Ln(BaseVal);
-        return Pow(BaseVal, n + One) / (n + One);
+            return Divide(Ln(Base), Coeff);
+        return Divide(Pow(Base, n + One), Multiply(Coeff, n + One));
     }
+}
+
+/// <summary>
+/// (EN) ∫ (p·x + q)/(a·x² + b·x + c) dx. The rational part contributes a logarithm and the pure
+///      quadratic part an arctangent (or a logarithm when the discriminant is positive), chosen from
+///      the sign of the discriminant Δ = b² - 4ac.
+/// (ZH) ∫ (p·x + q)/(a·x² + b·x + c) dx。有理部分贡献对数，纯二次部分贡献反正切（判别式为正时贡献
+///      对数）；分支由判别式 Δ = b² - 4ac 的符号决定。
+/// </summary>
+public sealed record QuadraticDenomRule : AtomicRule
+{
+    /// <summary>(EN) Quadratic coefficient a of the denominator. (ZH) 分母二次项系数 a。</summary>
+    public required Expression A { get; init; }
+    /// <summary>(EN) Linear coefficient b of the denominator. (ZH) 分母一次项系数 b。</summary>
+    public required Expression B { get; init; }
+    /// <summary>(EN) Constant term c of the denominator. (ZH) 分母常数项 c。</summary>
+    public required Expression C { get; init; }
+    /// <summary>(EN) Coefficient p of x in the numerator. (ZH) 分子中 x 的系数 p。</summary>
+    public required Expression P { get; init; }
+    /// <summary>(EN) Constant term q of the numerator. (ZH) 分子常数项 q。</summary>
+    public required Expression Q { get; init; }
+
+    /// <summary>
+    /// (EN) Evaluates the antiderivative using Δ = b² - 4ac to select the arctangent,
+    ///      double-root or logarithmic branch.
+    /// (ZH) 使用 Δ = b² - 4ac 选择反正切、重根或对数分支求原函数。
+    /// </summary>
+    public override Expression Eval()
+    {
+        var x = Variable;
+        var twoA = Multiply(Two, A);
+        var den = Add(Add(Multiply(A, x * x), Multiply(B, x)), C);
+
+        // (EN) Rational part: p/(2a)·ln|D|. (ZH) 有理部分：p/(2a)·ln|D|。
+        Expression result = Multiply(Divide(P, twoA), Ln(den));
+        // (EN) Remaining factor times ∫ dx/D. (ZH) 剩余系数乘以 ∫ dx/D。
+        var k = Subtract(Q, Divide(Multiply(B, P), twoA));
+        // (EN) Discriminant Δ = b² - 4ac. (ZH) 判别式 Δ = b² - 4ac。
+        var disc = Subtract(B * B, Multiply(Multiply(4, A), C));
+
+        Expression integralOfD;
+        if (disc is Expression.Number dn && dn.Value.IsNegative)
+        {
+            // (EN) Δ < 0: 2/√(-Δ)·atan((2ax+b)/√(-Δ)). (ZH) Δ < 0：2/√(-Δ)·atan((2ax+b)/√(-Δ))。
+            var s = Sqrt(Negate(disc));
+            integralOfD = Multiply(Divide(Two, s), Atan(Divide(Add(Multiply(twoA, x), B), s)));
+        }
+        else if (disc is Expression.Number dz && dz.Value.IsZero)
+        {
+            // (EN) Δ = 0: repeated root, ∫ dx/D = -2/(2ax+b). (ZH) Δ = 0：重根，∫ dx/D = -2/(2ax+b)。
+            integralOfD = Negate(Divide(Two, Add(Multiply(twoA, x), B)));
+        }
+        else
+        {
+            // (EN) Δ > 0 (or symbolic): roots r = (-b ± √Δ)/(2a); ∫ dx/D =
+            //      1/(a(r₊-r₋))·(ln|x-r₊| - ln|x-r₋|).
+            // (ZH) Δ > 0（或符号未知）：根 r = (-b ± √Δ)/(2a)；∫ dx/D =
+            //      1/(a(r₊-r₋))·(ln|x-r₊| - ln|x-r₋|)。
+            var s = Sqrt(disc);
+            var rPlus = Divide(Add(Negate(B), s), twoA);
+            var rMinus = Divide(Subtract(Negate(B), s), twoA);
+            integralOfD = Multiply(
+                Divide(One, Multiply(A, Subtract(rPlus, rMinus))),
+                Subtract(Ln(Subtract(x, rPlus)), Ln(Subtract(x, rMinus))));
+        }
+
+        return Add(result, Multiply(k, integralOfD));
+    }
+}
+
+/// <summary>
+/// (EN) Closed form for ∫ e^(a·x)·sin(b·x) dx and ∫ e^(a·x)·cos(b·x) dx (cyclic integration by
+///      parts solved algebraically).
+/// (ZH) ∫ e^(a·x)·sin(b·x) dx 与 ∫ e^(a·x)·cos(b·x) dx 的闭式（循环分部积分代数求解）。
+/// </summary>
+public sealed record ExpTimesTrigRule : AtomicRule
+{
+    /// <summary>(EN) Coefficient a of x in the exponential. (ZH) 指数中 x 的系数 a。</summary>
+    public required Expression A { get; init; }
+    /// <summary>(EN) Coefficient b of x in the trigonometric factor. (ZH) 三角因子中 x 的系数 b。</summary>
+    public required Expression B { get; init; }
+    /// <summary>(EN) True for cosine, false for sine. (ZH) true 表示余弦，false 表示正弦。</summary>
+    public required bool IsCos { get; init; }
+
+    /// <summary>
+    /// (EN) Returns e^(ax)·[a·sin(bx) - b·cos(bx)]/(a²+b²) for sine, or
+    ///      e^(ax)·[a·cos(bx) + b·sin(bx)]/(a²+b²) for cosine.
+    /// (ZH) 正弦返回 e^(ax)·[a·sin(bx) - b·cos(bx)]/(a²+b²)；余弦返回
+    ///      e^(ax)·[a·cos(bx) + b·sin(bx)]/(a²+b²)。
+    /// </summary>
+    public override Expression Eval()
+    {
+        var x = Variable;
+        var e = Exp(Multiply(A, x));
+        var denom = Add(Multiply(A, A), Multiply(B, B));
+        Expression num = IsCos
+            ? Add(Multiply(A, Cos(Multiply(B, x))), Multiply(B, Sin(Multiply(B, x))))
+            : Subtract(Multiply(A, Sin(Multiply(B, x))), Multiply(B, Cos(Multiply(B, x))));
+        return Divide(Multiply(e, num), denom);
+    }
+}
+
+/// <summary>
+/// (EN) Rule for a rational function integrated by polynomial division + partial fractions; the
+///      antiderivative is computed once by <c>RationalIntegrator</c> and stored in <c>Result</c>.
+/// (ZH) 通过多项式除法 + 部分分式积分有理函数的规则；原函数由 <c>RationalIntegrator</c> 计算一次并存入
+///      <c>Result</c>。
+/// </summary>
+public sealed record RationalFunctionRule : AtomicRule
+{
+    /// <summary>(EN) Precomputed antiderivative. (ZH) 预先计算的原函数。</summary>
+    public required Expression Result { get; init; }
+
+    /// <summary>(EN) Returns the stored antiderivative. (ZH) 返回已存储的原函数。</summary>
+    public override Expression Eval() => Result;
 }
 
 /// <summary>
@@ -1491,4 +1603,171 @@ public sealed record EllipticERule : AtomicRule
         var e = new Expression.FunctionN(FunctionNType.EllipticE, new[] { x, m });
         return e * Sqrt(A);
     }
+}
+
+/// <summary>
+/// (EN) Rule for the Weierstrass (universal) substitution t = tan(x/2) applied to a rational function
+///      of sin(x) and cos(x); the antiderivative is expressed back in x by re-substituting t.
+/// (ZH) 对 sin(x)、cos(x) 的有理函数应用 Weierstrass（万能）代换 t = tan(x/2) 的规则；通过回代 t 将
+///      原函数表示回 x。
+/// </summary>
+public sealed record WeierstrassRule : AtomicRule
+{
+    /// <summary>
+    /// (EN) The auxiliary substitution variable t.
+    /// (ZH) 辅助代换变量 t。
+    /// </summary>
+    public required Expression T { get; init; }
+
+    /// <summary>
+    /// (EN) Antiderivative in t (a rational expression in t).
+    /// (ZH) 关于 t 的原函数（t 的有理表达式）。
+    /// </summary>
+    public required Expression ResultInT { get; init; }
+
+    /// <summary>
+    /// (EN) Evaluates the t-antiderivative and substitutes t = tan(x/2).
+    /// (ZH) 求 t 的原函数并回代 t = tan(x/2)。
+    /// </summary>
+    public override Expression Eval()
+    {
+        var tanHalf = Tan(Divide(Variable, Two));
+        return Structure.Substitute(T, tanHalf, ResultInT);
+    }
+}
+
+/// <summary>
+/// (EN) Rule that integrates in an auxiliary variable T (produced by an exponential or root
+///      substitution) and re-substitutes T by an expression in the original variable.
+/// (ZH) 在辅助变量 T（由指数或根式换元产生）上积分，并将 T 回代为原变量的表达式。
+/// </summary>
+public sealed record BackSubstitutionRule : AtomicRule
+{
+    /// <summary>(EN) The auxiliary variable T. (ZH) 辅助变量 T。</summary>
+    public required Expression T { get; init; }
+
+    /// <summary>(EN) Antiderivative in T. (ZH) 关于 T 的原函数。</summary>
+    public required Expression ResultInT { get; init; }
+
+    /// <summary>(EN) Expression in the original variable that T equals (e.g. e^x or √x). (ZH) T 等于的原变量表达式（如 e^x 或 √x）。</summary>
+    public required Expression BackExpr { get; init; }
+
+    /// <summary>(EN) Substitutes T by BackExpr. (ZH) 将 T 回代为 BackExpr。</summary>
+    public override Expression Eval() => Structure.Substitute(T, BackExpr, ResultInT);
+}
+
+/// <summary>
+/// (EN) ∫ asec(x) dx = x·asec(x) - ln|x+√(x²-1)| and ∫ acsc(x) dx = x·acsc(x) + ln|x+√(x²-1)|.
+/// (ZH) ∫ asec(x) dx = x·asec(x) - ln|x+√(x²-1)|，∫ acsc(x) dx = x·acsc(x) + ln|x+√(x²-1)|。
+/// </summary>
+public sealed record InverseSecRule : AtomicRule
+{
+    /// <summary>(EN) True for arccosecant, false for arcsecant. (ZH) true 为反余割，false 为反正割。</summary>
+    public required bool IsCsc { get; init; }
+
+    /// <summary>(EN) Evaluates the closed form. (ZH) 求闭式。</summary>
+    public override Expression Eval()
+    {
+        var x = Variable;
+        var self = new Expression.Function(IsCsc ? FunctionType.Acsc : FunctionType.Asec, x);
+        var logTerm = Ln(Add(x, Sqrt(x * x - One)));
+        return IsCsc ? Add(Multiply(self, x), logTerm) : Subtract(Multiply(self, x), logTerm);
+    }
+}
+
+/// <summary>
+/// (EN) Rule for ∫ (p·x+q)/√(a+b·x+c·x²) dx (c &gt; 0): write the numerator as a multiple of the
+///      derivative 2cx+b plus a constant, giving 2·A·√R plus a constant times ∫dx/√R.
+/// (ZH) ∫ (p·x+q)/√(a+b·x+c·x²) dx（c &gt; 0）的规则：把分子写成 (2cx+b) 的倍数加常数，得到 2·A·√R
+///      加上常数倍的 ∫dx/√R。
+/// </summary>
+public sealed record SqrtQuadraticDenomRule : AtomicRule
+{
+    /// <summary>(EN) Constant term a of the quadratic. (ZH) 二次式常数项 a。</summary>
+    public required Expression A { get; init; }
+    /// <summary>(EN) Linear coefficient b of the quadratic. (ZH) 二次式一次项系数 b。</summary>
+    public required Expression B { get; init; }
+    /// <summary>(EN) Quadratic coefficient c (&gt; 0). (ZH) 二次项系数 c（&gt; 0）。</summary>
+    public required Expression C { get; init; }
+    /// <summary>(EN) Coefficient p of x in the numerator. (ZH) 分子中 x 的系数 p。</summary>
+    public required Expression P { get; init; }
+    /// <summary>(EN) Constant term q of the numerator. (ZH) 分子常数项 q。</summary>
+    public required Expression Q { get; init; }
+
+    /// <summary>
+    /// (EN) Evaluates the antiderivative. (ZH) 求原函数。
+    /// </summary>
+    public override Expression Eval()
+    {
+        var x = Variable;
+        var r = Add(Add(A, Multiply(B, x)), Multiply(C, x * x));
+        var sqrtR = Sqrt(r);
+        var twoC = Multiply(Two, C);
+        var a2 = Divide(P, twoC);
+        var beta = Subtract(Q, Multiply(a2, B));
+        // (EN) ∫dx/√R = 1/√c·ln(2cx+b+2√c·√R). (ZH) ∫dx/√R = 1/√c·ln(2cx+b+2√c·√R)。
+        var recip = Multiply(Divide(One, Sqrt(C)),
+            Ln(Add(Add(Multiply(twoC, x), B), Multiply(Multiply(Two, Sqrt(C)), sqrtR))));
+        return Add(Multiply(a2, Multiply(Two, sqrtR)), Multiply(beta, recip));
+    }
+}
+
+/// <summary>
+/// (EN) Rule for ∫ Heaviside(m·x+b)·g(x) dx = Heaviside(m·x+b)·(G(x) − G(−b/m)), where G is the
+///      antiderivative of g; the subtraction enforces continuity at x = −b/m.
+/// (ZH) ∫ Heaviside(m·x+b)·g(x) dx 的规则 = Heaviside(m·x+b)·(G(x) − G(−b/m))，其中 G 为 g 的原函数；
+///      减去常数以保证在 x = −b/m 处连续。
+/// </summary>
+public sealed record HeavisideRule : AtomicRule
+{
+    /// <summary>(EN) The Heaviside argument m·x+b. (ZH) Heaviside 的参数 m·x+b。</summary>
+    public required Expression HArg { get; init; }
+
+    /// <summary>(EN) The continuity breakpoint −b/m. (ZH) 连续性断点 −b/m。</summary>
+    public required Expression IBnd { get; init; }
+
+    /// <summary>(EN) Antiderivative of the co-factor g. (ZH) 余因子 g 的原函数。</summary>
+    public required IntegrationRule Substeps { get; init; }
+
+    /// <summary>(EN) Evaluates the step-function antiderivative. (ZH) 求阶跃函数原函数。</summary>
+    public override Expression Eval()
+    {
+        var g = Substeps.Eval();
+        var shifted = Structure.Substitute(Variable, IBnd, g);
+        return Multiply(new Expression.Function(FunctionType.Heaviside, HArg), Subtract(g, shifted));
+    }
+
+    /// <summary>(EN) True if the co-factor integral failed. (ZH) 余因子积分失败时为 true。</summary>
+    public override bool ContainsDontKnow => Substeps.ContainsDontKnow;
+}
+
+/// <summary>
+/// (EN) Rule for ∫ δ⁽ⁿ⁾(a+b·x) dx: n = 0 gives Heaviside(a+bx)/b, otherwise δ⁽ⁿ⁻¹⁾(a+bx)/b.
+/// (ZH) ∫ δ⁽ⁿ⁾(a+b·x) dx 的规则：n = 0 时为 Heaviside(a+bx)/b，否则为 δ⁽ⁿ⁻¹⁾(a+bx)/b。
+/// </summary>
+public sealed record DiracDeltaRule : AtomicRule
+{
+    /// <summary>(EN) Order n of the delta. (ZH) δ 的阶数 n。</summary>
+    public required int N { get; init; }
+
+    /// <summary>(EN) Constant term a of the argument a+b·x. (ZH) 参数 a+b·x 的常数项 a。</summary>
+    public required Expression A { get; init; }
+
+    /// <summary>(EN) Coefficient b of x in the argument. (ZH) 参数中 x 的系数 b。</summary>
+    public required Expression B { get; init; }
+
+    /// <summary>(EN) Evaluates the distributional antiderivative. (ZH) 求分布意义下的原函数。</summary>
+    public override Expression Eval()
+    {
+        var arg = Add(A, Multiply(B, Variable));
+        if (N == 0)
+            return Divide(new Expression.Function(FunctionType.Heaviside, arg), B);
+        return Divide(DiracDeltaExpr(arg, N - 1), B);
+    }
+
+    /// <summary>(EN) Builds δ⁽ⁿ⁾(arg) as an expression (order 0 is unary). (ZH) 构造 δ⁽ⁿ⁾(arg) 表达式（0 阶为一元）。</summary>
+    internal static Expression DiracDeltaExpr(Expression arg, int n)
+        => n == 0
+            ? new Expression.Function(FunctionType.DiracDelta, arg)
+            : new Expression.FunctionN(FunctionNType.DiracDelta, new[] { arg, Expression.Int32(n) });
 }

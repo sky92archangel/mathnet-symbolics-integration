@@ -259,8 +259,11 @@ public abstract partial record Expression
         {
             // 1/(x) → 1/x
             if (Exponent is Number ne && ne.Value.IsMinusOne)
-                return "1/" + RenderFactor(Base, false);
-            string baseStr = RenderFactor(Base, false);
+                return "1/" + (Base is Product ? "(" + Base.ToString() + ")" : RenderFactor(Base, false));
+            // (EN) A product base must be parenthesised: (2·t)², not 2·t². (ZH) 乘积底必须加括号：(2·t)²，而非 2·t²。
+            string baseStr = Base is Product
+                ? "(" + Base.ToString() + ")"
+                : RenderFactor(Base, false);
             string expStr = ExponentToString(Exponent);
             if (expStr == "1") return baseStr;
             if (expStr == "0") return "1";
@@ -328,6 +331,8 @@ public abstract partial record Expression
                 FunctionType.AiryAiPrime => "Ai'",
                 FunctionType.AiryBi => "Bi",
                 FunctionType.AiryBiPrime => "Bi'",
+                FunctionType.Heaviside => "Heaviside",
+                FunctionType.DiracDelta => "DiracDelta",
                 _ => Op.ToString()
             };
             if (Op == FunctionType.Exp)
