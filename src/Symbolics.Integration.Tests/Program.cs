@@ -1500,6 +1500,107 @@ Run("1/(sin(x)+cos(x))", () => {
     Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
 });
 
+// ── combine_power / nested_pow / P(x)·√(quadratic) / generalized Erf ──
+// (EN) Tests for fractional & exponential factor combination, nested affine powers, polynomial
+//      times √(quadratic), and the generalized exponential (erf/erfi) rule.
+// (ZH) 分数/指数因式合并、嵌套仿射幂、多项式乘 √(二次式)、以及广义指数（erf/erfi）规则的测试。
+
+// (EN) ∫ x^(1/2)·x^(1/3) dx = (6/11)x^(11/6) — fractional power combination.
+// (ZH) ∫ x^(1/2)·x^(1/3) dx = (6/11)x^(11/6) —— 分数幂合并。
+Run("x^(1/2)*x^(1/3)", () => {
+    var x = Symbol("x");
+    var expr = Pow(x, new Expression.Number(new Rational(1, 2)))
+             * Pow(x, new Expression.Number(new Rational(1, 3)));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x^(1/2)·x^(1/3) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ e^(2x)·e^(3x) dx = e^(5x)/5 — exponential combination.
+// (ZH) ∫ e^(2x)·e^(3x) dx = e^(5x)/5 —— 指数合并。
+Run("exp(2x)*exp(3x)", () => {
+    var x = Symbol("x");
+    var expr = Exp(2*x) * Exp(3*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ e^(2x)·e^(3x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ e^(x²+x) dx = √π/2·e^(−1/4)·erfi((2x+1)/2) — generalized Erf rule.
+// (ZH) ∫ e^(x²+x) dx = √π/2·e^(−1/4)·erfi((2x+1)/2) —— 广义 Erf 规则。
+Run("exp(x^2+x)", () => {
+    var x = Symbol("x");
+    var expr = Exp(x*x + x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ e^(x²+x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ ((1+x)^2)^(3/2) dx — nested affine power.
+// (ZH) ∫ ((1+x)^2)^(3/2) dx —— 嵌套仿射幂。
+Run("((1+x)^2)^(3/2)", () => {
+    var x = Symbol("x");
+    var expr = Pow(Pow(x + 1, 2), new Expression.Number(new Rational(3, 2)));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ ((1+x)²)^(3/2) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x²·√(1+x²) dx — polynomial times √(quadratic).
+// (ZH) ∫ x²·√(1+x²) dx —— 多项式乘 √(二次式)。
+Run("x^2*sqrt(1+x^2)", () => {
+    var x = Symbol("x");
+    var expr = x*x * Sqrt(1 + x*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x²·√(1+x²) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ √(x+√x) dx — nested radical resolved via √x substitution plus √(quadratic) reduction.
+// (ZH) ∫ √(x+√x) dx —— 通过 √x 换元加 √(二次式) 递推求解的嵌套根式。
+Run("sqrt(x+sqrt(x))", () => {
+    var x = Symbol("x");
+    var expr = Sqrt(x + Sqrt(x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ √(x+√x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// ── Biquadratic denominators (conjugate irrational quadratics) ──
+// (EN) Tests for ∫(P·x²+Q)/(x⁴+a·x²+b) dx, whose denominator factors into conjugate quadratics
+//      with irrational coefficients (e.g. 1/(x⁴+1)).
+// (ZH) ∫(P·x²+Q)/(x⁴+a·x²+b) dx 的测试，其分母分解为无理系数的共轭二次因子（如 1/(x⁴+1)）。
+
+// (EN) ∫ 1/(x⁴+1) dx.
+// (ZH) ∫ 1/(x⁴+1) dx。
+Run("1/(x^4+1)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (Pow(x, 4) + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x⁴+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ (x²+1)/(x⁴+1) dx.
+// (ZH) ∫ (x²+1)/(x⁴+1) dx。
+Run("(x^2+1)/(x^4+1)", () => {
+    var x = Symbol("x");
+    var expr = (x*x + 1) / (Pow(x, 4) + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (x²+1)/(x⁴+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(3+2x²)² dx — repeated quadratic with non-integer rational coefficients.
+// (ZH) ∫ 1/(3+2x²)² dx —— 具有非整数有理系数的重复二次式。
+Run("1/(3+2x^2)^2", () => {
+    var x = Symbol("x");
+    var expr = 1 / Pow(3 + 2*x*x, 2);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(3+2x²)² dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
 Console.WriteLine($"\n=== Result: {passed} passed, {failed} failed ===");
 
 // (EN) Minimal assertion helper: throws when the condition is false so that the

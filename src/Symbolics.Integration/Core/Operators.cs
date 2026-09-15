@@ -218,17 +218,22 @@ public static class Operators
         {
             if (constMul.Value.IsMinusOne)
             {
-                // (EN) Direct negation, NOT calling Negate to avoid recursion. (ZH) 直接取负，不调用 Negate 以避免递归。
+                // (EN) Direct negation, NOT calling Negate to avoid recursion; keep products flat.
+                // (ZH) 直接取负，不调用 Negate 以避免递归；保持乘积扁平。
                 if (result is Expression.Number rn)
                     result = new Expression.Number(-rn.Value);
+                else if (result is Expression.Product rp)
+                    result = new Expression.Product(new[] { MinusOne }.Concat(rp.Factors).ToList());
                 else
-                    result = new Expression.Product(
-                        new[] { MinusOne, result! });
+                    result = new Expression.Product(new[] { MinusOne, result! });
             }
             else
             {
-                result = new Expression.Product(
-                    new[] { new Expression.Number(constMul.Value), result! });
+                var cnum = new Expression.Number(constMul.Value);
+                if (result is Expression.Product rp2)
+                    result = new Expression.Product(new[] { cnum }.Concat(rp2.Factors).ToList());
+                else
+                    result = new Expression.Product(new[] { cnum, result! });
             }
         }
         return result!;
@@ -512,51 +517,50 @@ public static class Operators
     {
         if (factors.Count <= 1) return factors;
 
-        var groups = new Dictionary<Expression, int>();
+        // (EN) Sum exponents per base (rational exponents combine too: x^½·x^⅓ = x^⅚), and combine
+        //      exponentials e^a·e^b = e^(a+b).
+        // (ZH) 按底累加指数（有理指数也合并：x^½·x^⅓ = x^⅚），并合并指数 e^a·e^b = e^(a+b)。
+        var groups = new Dictionary<Expression, Rational>();
+        var expArgs = new List<Expression>();
         var others = new List<Expression>();
 
         foreach (var f in factors)
         {
-            if (f is Expression.Power pw && !(pw.Base is Expression.Number))
+            if (f is Expression.Number || f is Expression.Constant) { others.Add(f); continue; }
+
+            if (f is Expression.Function fn && fn.Op == FunctionType.Exp)
             {
-                // (EN) Already a power: try to combine base. (ZH) 已是幂式：尝试合并底数。
-                if (pw.Exponent is Expression.Number expN && expN.Value.IsInteger)
-                {
-                    if (groups.ContainsKey(pw.Base))
-                        groups[pw.Base] += expN.Value.ToInt32();
-                    else
-                    {
-                        // (EN) We'll look up non-power forms too. (ZH) 也会查找非幂形式。
-                        groups[pw.Base] = expN.Value.ToInt32();
-                        // (EN) Remove from others if the plain form exists. (ZH) 若存在普通形式则从 others 中移除。
-                    }
-                    continue;
-                }
-            }
-            if (!(f is Expression.Number) && !(f is Expression.Constant))
-            {
-                if (groups.ContainsKey(f))
-                    groups[f] += 1;
-                else
-                    groups[f] = 1;
+                expArgs.Add(fn.Argument);
                 continue;
             }
-            others.Add(f);
+
+            Expression? bas = f;
+            Rational exp = Rational.One;
+            if (f is Expression.Power pw)
+            {
+                if (pw.Exponent is not Expression.Number pe) { others.Add(f); continue; }
+                bas = pw.Base;
+                exp = pe.Value;
+            }
+            groups[bas] = (groups.TryGetValue(bas, out var cur) ? cur : Rational.Zero) + exp;
         }
 
         var result = new List<Expression>();
-        Rational? numProduct = null;
         foreach (var kv in groups)
         {
-            if (kv.Value == 1)
-                result.Add(kv.Key);
-            else if (kv.Value > 1)
-                result.Add(new Expression.Power(kv.Key, Expression.Int32(kv.Value)));
-            else if (kv.Value < 0)
-                result.Add(new Expression.Power(kv.Key, Expression.Int32(kv.Value)));
-            // (EN) value == 0 means x^0 = 1, skip. (ZH) value == 0 表示 x^0 = 1，跳过。
+            if (kv.Value.IsZero) continue;
+            if (kv.Value.IsOne) result.Add(kv.Key);
+            else result.Add(Pow(kv.Key, new Expression.Number(kv.Value)));
         }
-        // (EN) Multiply all numeric factors together. (ZH) 将所有数值因子相乘。
+
+        if (expArgs.Count > 0)
+        {
+            var total = expArgs[0];
+            for (int i = 1; i < expArgs.Count; i++) total = Add(total, expArgs[i]);
+            result.Add(Exp(total));
+        }
+
+        Rational? numProduct = null;
         foreach (var f in others)
         {
             if (f is Expression.Number n)

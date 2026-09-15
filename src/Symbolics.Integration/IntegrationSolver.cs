@@ -183,6 +183,10 @@ internal class IntegrationSolver
         rule = TryChebyshevSubstitutionRule(integrand, variable);
         if (rule is not null && !rule.ContainsDontKnow) return rule;
 
+        // (EN) 3c-11. Nested affine power ((a+bx)^d)^e → (a+bx)^(d·e). (ZH) 3c-11. 嵌套仿射幂 ((a+bx)^d)^e → (a+bx)^(d·e)。
+        rule = TryNestedPowRule(integrand, variable);
+        if (rule is not null && !rule.ContainsDontKnow) return rule;
+
         // (EN) If the integrand is a genuine rational function that partial fractions could not solve,
         //      the later heuristics (substitution/parts) will not help and can blow up; stop here.
         // (ZH) 若被积式确为有理函数但部分分式无法求解，后续启发式（换元/分部）也无效且可能爆炸；在此停止。
@@ -272,6 +276,14 @@ internal class IntegrationSolver
         // (EN) ∫ (px+q)/√(ax²+bx+c) dx  (SqrtQuadraticDenomRule). (ZH) ∫ (px+q)/√(ax²+bx+c) dx（SqrtQuadraticDenomRule）。
         if (TryMatchSqrtQuadraticDenom(integrand, variable, out var sqrtDenomRule))
             return sqrtDenomRule;
+
+        // (EN) ∫ P(x)·√(ax²+bx+c) dx  (SqrtQuadraticPolyRule). (ZH) ∫ P(x)·√(ax²+bx+c) dx（SqrtQuadraticPolyRule）。
+        if (TryMatchSqrtQuadraticPoly(integrand, variable) is { } sqrtPolyRule)
+            return sqrtPolyRule;
+
+        // (EN) ∫ (P·x²+Q)/(x⁴+a·x²+b) dx  (BiquadraticRule). (ZH) ∫ (P·x²+Q)/(x⁴+a·x²+b) dx（BiquadraticRule）。
+        if (TryMatchBiquadratic(integrand, variable) is { } biqRule)
+            return biqRule;
 
         // (EN) ∫ 1/(a+bx²) dx  (ArctanRule). (ZH) ∫ 1/(a+bx²) dx（ArctanRule）。
         if (TryMatchArctan(integrand, variable, out var arctanRule))
@@ -542,6 +554,74 @@ internal class IntegrationSolver
     }
 
     /// <summary>
+    /// (EN) Match ∫ (P·x²+Q)/(x⁴+a·x²+b) dx with b &gt; 0 and 2√b &gt; a. (ZH) 匹配 b &gt; 0 且 2√b &gt; a 的 ∫ (P·x²+Q)/(x⁴+a·x²+b) dx。
+    /// </summary>
+    private static IntegrationRule? TryMatchBiquadratic(Expression integrand, Expression variable)
+    {
+        if (!RationalIntegrator.TryToRationalFunction(integrand, variable, out var nc, out var dc)) return null;
+        if (Polynomial.Degree(dc) != 4) return null;
+        // (EN) Even quartic: x⁴ + a·x² + b (no x³, no x terms). (ZH) 偶四次式：x⁴+a·x²+b（无 x³、x 项）。
+        if (dc.Count < 5 || !dc[3].IsZero || !dc[1].IsZero) return null;
+        var c = dc[4];
+        if (c.IsZero) return null;
+        var a = dc[2];
+        var b = dc[0];
+        if (b.IsZero || b.IsNegative) return null;
+        // (EN) Need 2√b > a: automatic when a ≤ 0, else 4b > a². (ZH) 需 2√b > a：a ≤ 0 自动成立，否则 4b > a²。
+        if (a.IsPositive && !(b * (Rational)4 - a * a).IsPositive) return null;
+
+        // (EN) Even numerator of degree ≤ 2. (ZH) 次数 ≤ 2 的偶分子。
+        if (Polynomial.Degree(nc) > 2) return null;
+        if (nc.Count > 1 && !nc[1].IsZero) return null;
+        var p = nc.Count > 2 ? nc[2] : Rational.Zero;
+        var q = nc.Count > 0 ? nc[0] : Rational.Zero;
+
+        return new BiquadraticRule
+        {
+            Integrand = integrand, Variable = variable,
+            A = new Expression.Number(a / c), B = new Expression.Number(b / c),
+            P = new Expression.Number(p), Q = new Expression.Number(q),
+            Leading = new Expression.Number(c)
+        };
+    }
+
+    /// <summary>
+    /// (EN) Match ∫ P(x)·√(a+bx+cx²) dx by turning it into ∫ P(x)·Q/√Q dx and using the reduction.
+    /// (ZH) 通过把 ∫ P(x)·√(a+bx+cx²) dx 改写为 ∫ P(x)·Q/√Q dx 并使用递推来匹配。
+    /// </summary>
+    private static IntegrationRule? TryMatchSqrtQuadraticPoly(Expression integrand, Expression variable)
+    {
+        if (integrand is not Expression.Product prod) return null;
+
+        int idx = -1;
+        Expression? quad = null;
+        for (int i = 0; i < prod.Factors.Count; i++)
+        {
+            if (prod.Factors[i] is Expression.Power fp && fp.Exponent is Expression.Number he
+                && he.Value.Numerator == 1 && he.Value.Denominator == 2
+                && TryExtractQuadratic(fp.Base, variable, out _, out _, out var qc)
+                && qc is Expression.Number qcn && qcn.Value.IsPositive)
+            { idx = i; quad = fp.Base; break; }
+        }
+        if (idx < 0 || quad is null) return null;
+
+        var rest = prod.Factors.Where((_, i) => i != idx).ToList();
+        var pExpr = rest.Count == 1 ? rest[0] : new Expression.Product(rest);
+        if (!TryToPoly(pExpr, variable, out var pc)) return null;
+
+        if (!TryExtractQuadratic(quad, variable, out var ct, out var lt, out var qt)) return null;
+        if (ct is not Expression.Number cn || lt is not Expression.Number ln || qt is not Expression.Number qn) return null;
+
+        // (EN) Numerator becomes P·Q. (ZH) 分子变为 P·Q。
+        var full = Polynomial.Multiply(pc, new List<Rational> { cn.Value, ln.Value, qn.Value });
+        return new SqrtQuadraticPolyRule
+        {
+            Integrand = integrand, Variable = variable,
+            Num = full, A = qn.Value, B = ln.Value, C = cn.Value
+        };
+    }
+
+    /// <summary>
     /// (EN) Match ∫ (p·x+q)/√(a+bx+cx²) dx for c &gt; 0. (ZH) 匹配 c &gt; 0 的 ∫ (p·x+q)/√(a+bx+cx²) dx。
     /// </summary>
     private bool TryMatchSqrtQuadraticDenom(Expression integrand, Expression variable,
@@ -652,43 +732,56 @@ internal class IntegrationSolver
         out ErfRule? rule)
     {
         rule = null;
-        // (EN) Pattern: exp(-x²). (ZH) 模式：exp(-x²)。
-        if (integrand is Expression.Function { Op: FunctionType.Exp } f &&
-            f.Argument is Expression.Power p && p.Base.Equals(variable) &&
-            p.Exponent is Expression.Number n && n.Value.Numerator == 2 && n.Value.Denominator == 1 &&
-            f.Argument is Expression.Power p2 && p2.Exponent is Expression.Number { Value: var expVal }
-            && expVal.Numerator == 2 && expVal.Denominator == 1)
-        {
-            // (EN) exp(-x²) → need to check for negative. (ZH) exp(-x²) → 需要检查负号。
-            if (f.Argument is Expression.Power { Exponent: Expression.Number { Value: var ev2 } })
-            {
-                // (EN) The Power is x^2, but we need -x^2 as the argument to exp.
-                // (ZH) Power 是 x^2，但需要 -x^2 作为 exp 的参数。
-                rule = new ErfRule { Integrand = integrand, Variable = variable };
-                return true;
-            }
-        }
-        // (EN) exp(-x²) where the inner is Pow(x, 2) multiplied by -1.
-        // (ZH) exp(-x²)，其中内部是 Pow(x, 2) 乘以 -1。
-        if (integrand is Expression.Function { Op: FunctionType.Exp, Argument: var arg } &&
-            arg is Expression.Product prod && prod.Factors.Count == 2 &&
-            prod.Factors[0] is Expression.Number neg && neg.Value.IsMinusOne &&
-            prod.Factors[1] is Expression.Power pw && pw.Base.Equals(variable) &&
-            pw.Exponent is Expression.Number n2 && n2.Value.ToInt32() == 2)
-        {
-            rule = new ErfRule { Integrand = integrand, Variable = variable };
-            return true;
-        }
-        // (EN) Also handle Pow(x, 2) directly being the argument with Negate.
-        // (ZH) 也处理 Pow(x, 2) 直接作为参数且带有 Negate 的情形。
-        if (integrand is Expression.Function { Op: FunctionType.Exp, Argument: var arg2 } &&
-            arg2 is Expression.Power pw2 && pw2.Base.Equals(variable) &&
-            pw2.Exponent is Expression.Number n3 && n3.Value.ToInt32() == 2)
-        {
-            // (EN) exp(x²) is not an Erf integral. (ZH) exp(x²) 不是 Erf 积分。
-        }
-        return false;
+        // (EN) Pattern: exp(a·x² + b·x + c) with numeric a,b,c and a ≠ 0. (ZH) 模式：exp(a·x²+b·x+c)，a,b,c 为数值且 a ≠ 0。
+        if (integrand is not Expression.Function { Op: FunctionType.Exp, Argument: var arg }) return false;
+
+        if (!TryExtractQuadraticLoose(arg, variable, out var a, out var b, out var c)) return false;
+        if (a is not Expression.Number an || b is not Expression.Number || c is not Expression.Number) return false;
+        if (an.Value.IsZero) return false;
+
+        rule = new ErfRule { Integrand = integrand, Variable = variable, A = a, B = b, C = c };
+        return true;
     }
+
+    /// <summary>
+    /// (EN) Extracts (a, b, c) from a numeric polynomial a·x²+b·x+c of degree at most 2, allowing
+    ///      missing lower-order terms (used by the exponential/erf rule).
+    /// (ZH) 从至多二次的数值多项式 a·x²+b·x+c 中提取 (a, b, c)，允许缺少低阶项（供指数/erf 规则使用）。
+    /// </summary>
+    private static bool TryExtractQuadraticLoose(Expression expr, Expression v,
+        out Expression a, out Expression b, out Expression c)
+    {
+        a = Zero; b = Zero; c = Zero;
+        // (EN) Expand first so nested constant·sum factors distribute (e.g. -1·(2x-1) → -2x+1).
+        // (ZH) 先展开，使嵌套的「常数·和式」因式分配（如 -1·(2x-1) → -2x+1）。
+        expr = ExpandFully(expr, MaxIntegrandNodes) ?? expr;
+        bool found = false;
+        foreach (var t in Algebraic.Summands(expr))
+        {
+            Rational coeff = Rational.One;
+            int deg = 0;
+            foreach (var f in Algebraic.Factors(t))
+            {
+                if (!Structure.ContainsVariable(f, v))
+                {
+                    if (f is Expression.Number fn) coeff *= fn.Value;
+                    else return false;
+                }
+                else if (f.Equals(v)) deg += 1;
+                else if (f is Expression.Power p && p.Base.Equals(v)
+                    && p.Exponent is Expression.Number ne && ne.Value.IsInteger && ne.Value.ToInt32() >= 0)
+                    deg += ne.Value.ToInt32();
+                else return false;
+            }
+            if (deg > 2) return false;
+            var num = new Expression.Number(coeff);
+            if (deg == 0) c = Add(c, num);
+            else if (deg == 1) b = Add(b, num);
+            else { a = Add(a, num); found = true; }
+        }
+        return found;
+    }
+
 
     /// <summary>
     /// (EN) Match special function integrals: Si, Ci, Shi, Chi, Ei, Li, Fresnel,
@@ -2154,6 +2247,32 @@ internal class IntegrationSolver
     }
 
     /// <summary>
+    /// (EN) Match a nested affine power ((a+b·x)^d)^e and rewrite it to (a+b·x)^(d·e).
+    /// (ZH) 匹配嵌套仿射幂 ((a+b·x)^d)^e 并改写为 (a+b·x)^(d·e)。
+    /// </summary>
+    private IntegrationRule? TryNestedPowRule(Expression integrand, Expression variable)
+    {
+        if (integrand is not Expression.Power outer) return null;
+        if (outer.Base is not Expression.Power inner) return null;
+        if (outer.Exponent is not Expression.Number || inner.Exponent is not Expression.Number) return null;
+        // (EN) Only an affine inner base is safe (matches SymPy's nested_pow_rule). (ZH) 仅内层为仿射底才安全（与 SymPy nested_pow_rule 一致）。
+        if (TryExtractLinearCoeff(inner.Base, variable) is null) return null;
+
+        var newExp = Multiply(inner.Exponent, outer.Exponent);
+        if (newExp is not Expression.Number) return null;
+        var rewritten = Pow(inner.Base, newExp);
+        if (rewritten.Equals(integrand)) return null;
+
+        var substep = Solve(rewritten, variable);
+        if (substep.ContainsDontKnow) return null;
+        return new RewriteRule
+        {
+            Integrand = integrand, Variable = variable,
+            Rewritten = rewritten, Substeps = substep
+        };
+    }
+
+    /// <summary>
     /// (EN) Parses integrand = c·x^m·(a+b·x^n)^p with numeric a,b,c and rational m,n,p. (ZH) 解析 integrand = c·x^m·(a+b·x^n)^p。
     /// </summary>
     private static bool TryParseBinomialDifferential(Expression integrand, Expression v,
@@ -2401,8 +2520,21 @@ internal class IntegrationSolver
     private static IntegrationRule? BuildBackSubstitution(Expression integrand, Expression variable,
         Expression t, Expression g, Expression backExpr)
     {
-        if (!RationalIntegrator.TryToRationalFunction(g, t, out var gn, out var gd)) return null;
-        if (!RationalIntegrator.TryIntegrate(gn, gd, t, out var resultInT)) return null;
+        Expression resultInT;
+        if (RationalIntegrator.TryToRationalFunction(g, t, out var gn, out var gd)
+            && RationalIntegrator.TryIntegrate(gn, gd, t, out var rationalResult))
+        {
+            resultInT = rationalResult;
+        }
+        else if (TryMatchSqrtQuadraticPoly(g, t) is { } sqrtPoly)
+        {
+            // (EN) Fallback for P(t)·√(quadratic) forms (e.g. from √(x+√x)). (ZH) P(t)·√(二次式) 形式的回退（如来自 √(x+√x)）。
+            resultInT = sqrtPoly.Eval();
+        }
+        else
+        {
+            return null;
+        }
         return new BackSubstitutionRule
         {
             Integrand = integrand, Variable = variable, T = t, ResultInT = resultInT, BackExpr = backExpr

@@ -1073,15 +1073,43 @@ public sealed record SimplePowerRule : AtomicRule
 public sealed record ErfRule : AtomicRule
 {
     /// <summary>
-    /// (EN) Returns the symbolic expression (√π/2)·erf(x); erf is not evaluated numerically here,
-    /// only represented as a function node.
-    /// (ZH) 返回符号表达式 (√π/2)·erf(x)；此处不对 erf 作数值求值，仅表示为函数节点。
+    /// (EN) Coefficient a of x² in the exponent a·x²+b·x+c.
+    /// (ZH) 指数 a·x²+b·x+c 中 x² 的系数 a。
+    /// </summary>
+    public required Expression A { get; init; }
+
+    /// <summary>(EN) Coefficient b of x in the exponent. (ZH) 指数中 x 的系数 b。</summary>
+    public required Expression B { get; init; }
+
+    /// <summary>(EN) Constant term c of the exponent. (ZH) 指数的常数项 c。</summary>
+    public required Expression C { get; init; }
+
+    /// <summary>
+    /// (EN) ∫ e^(a·x²+b·x+c) dx = √π/(2√(∓a))·e^(c-b²/(4a))·erf or erfi of the completed square;
+    ///      erf when a &lt; 0, erfi when a &gt; 0.
+    /// (ZH) ∫ e^(a·x²+b·x+c) dx = √π/(2√(∓a))·e^(c-b²/(4a))·erf 或 erfi（配方后）；a &lt; 0 用 erf，
+    ///      a &gt; 0 用 erfi。
     /// </summary>
     public override Expression Eval()
     {
-        // (EN) Symbolic result: sqrt(pi)/2 * erf(x). (ZH) 符号结果：sqrt(pi)/2 * erf(x)。
-        // (EN) Since we don't have erf built in, return the symbolic representation. (ZH) 因未内置 erf，仅返回符号表示。
-        return (Sqrt(Pi) / Two) * new Expression.Function(FunctionType.Erf, Variable);
+        var x = Variable;
+        var a = A;
+        var b = B;
+        var c = C;
+        var prefactorExp = Exp(Subtract(c, Divide(Multiply(b, b), Multiply(4, a))));
+
+        bool negA = a is Expression.Number an && an.Value.IsNegative;
+        if (negA)
+        {
+            var sqrtNegA = Sqrt(Negate(a));
+            var arg = Divide(Subtract(Multiply(Multiply(-2, a), x), b), Multiply(Two, sqrtNegA));
+            return Multiply(Multiply(Divide(Sqrt(Pi), Multiply(Two, sqrtNegA)), prefactorExp),
+                new Expression.Function(FunctionType.Erf, arg));
+        }
+        var sqrtA = Sqrt(a);
+        var arg2 = Divide(Add(Multiply(Multiply(Two, a), x), b), Multiply(Two, sqrtA));
+        return Multiply(Multiply(Divide(Sqrt(Pi), Multiply(Two, sqrtA)), prefactorExp),
+            new Expression.Function(FunctionType.Erfi, arg2));
     }
 }
 
@@ -1770,4 +1798,126 @@ public sealed record DiracDeltaRule : AtomicRule
         => n == 0
             ? new Expression.Function(FunctionType.DiracDelta, arg)
             : new Expression.FunctionN(FunctionNType.DiracDelta, new[] { arg, Expression.Int32(n) });
+}
+
+/// <summary>
+/// (EN) Rule for ∫ P(x)/√(a·x²+b·x+c) dx with a numeric polynomial numerator and a &gt; 0, via the
+///      reduction ∫xⁿ/√Q = xⁿ⁻¹√Q/(n·a) − (2n−1)b/(2n·a)∫xⁿ⁻¹/√Q − (n−1)c/(n·a)∫xⁿ⁻²/√Q.
+///      This also covers ∫ P(x)·√Q dx by using numerator P·Q.
+/// (ZH) ∫ P(x)/√(a·x²+b·x+c) dx 的规则，分子为数值多项式且 a &gt; 0，使用递推公式
+///      ∫xⁿ/√Q = xⁿ⁻¹√Q/(n·a) − (2n−1)b/(2n·a)∫xⁿ⁻¹/√Q − (n−1)c/(n·a)∫xⁿ⁻²/√Q。
+///      通过取分子 P·Q 也可覆盖 ∫ P(x)·√Q dx。
+/// </summary>
+public sealed record SqrtQuadraticPolyRule : AtomicRule
+{
+    /// <summary>(EN) Coefficients of the numerator polynomial P(x). (ZH) 分子多项式 P(x) 的系数。</summary>
+    public required IReadOnlyList<Rational> Num { get; init; }
+    /// <summary>(EN) Quadratic coefficient a (&gt; 0). (ZH) 二次项系数 a（&gt; 0）。</summary>
+    public required Rational A { get; init; }
+    /// <summary>(EN) Linear coefficient b. (ZH) 一次项系数 b。</summary>
+    public required Rational B { get; init; }
+    /// <summary>(EN) Constant term c. (ZH) 常数项 c。</summary>
+    public required Rational C { get; init; }
+
+    /// <summary>(EN) Evaluates the antiderivative by the reduction recurrence. (ZH) 通过递推公式求原函数。</summary>
+    public override Expression Eval()
+    {
+        var x = Variable;
+        var a = new Expression.Number(A);
+        var b = new Expression.Number(B);
+        var c = new Expression.Number(C);
+        var q = Add(Add(Multiply(a, x * x), Multiply(b, x)), c);
+        var sqrtQ = Sqrt(q);
+        var sqrtA = Sqrt(a);
+
+        // (EN) I0 = 1/√a·ln(2ax+b+2√a·√Q). (ZH) I0 = 1/√a·ln(2ax+b+2√a·√Q)。
+        var i0 = Multiply(Divide(One, sqrtA),
+            Ln(Add(Add(Multiply(Multiply(Two, a), x), b), Multiply(Multiply(Two, sqrtA), sqrtQ))));
+
+        int deg = Polynomial.Degree(Num);
+        if (deg < 0) return Zero;
+        Expression? result = null;
+
+        // (EN) I1 = √Q/a − b/(2a)·I0. (ZH) I1 = √Q/a − b/(2a)·I0。
+        Expression iPrev2 = i0;                                   // I0
+        Expression iPrev1 = Subtract(Divide(sqrtQ, a), Multiply(Divide(b, Multiply(Two, a)), i0)); // I1
+
+        if (deg == 0) result = Multiply(new Expression.Number(Num[0]), i0);
+        else
+        {
+            var i1 = iPrev1;
+            var terms = new List<Expression>();
+            if (!Num[0].IsZero) terms.Add(Multiply(new Expression.Number(Num[0]), i0));
+            if (Num.Count > 1 && !Num[1].IsZero) terms.Add(Multiply(new Expression.Number(Num[1]), i1));
+            for (int n = 2; n <= deg; n++)
+            {
+                // (EN) I_n = x^(n-1)√Q/(n·a) − ((2n−1)b)/(2n·a)·I_{n−1} − ((n−1)c)/(n·a)·I_{n−2}.
+                // (ZH) 同上递推。
+                var t1 = Divide(Multiply(Pow(x, n - 1), sqrtQ), Multiply(new Expression.Number((Rational)n), a));
+                var t2 = Multiply(
+                    Divide(Multiply(new Expression.Number((Rational)(2 * n - 1)), b),
+                        Multiply(new Expression.Number((Rational)(2 * n)), a)),
+                    iPrev1);
+                var t3 = Multiply(
+                    Divide(Multiply(new Expression.Number((Rational)(n - 1)), c),
+                        Multiply(new Expression.Number((Rational)n), a)),
+                    iPrev2);
+                var iN = Subtract(Subtract(t1, t2), t3);
+                iPrev2 = iPrev1;
+                iPrev1 = iN;
+                if (n < Num.Count && !Num[n].IsZero)
+                    terms.Add(Multiply(new Expression.Number(Num[n]), iN));
+            }
+            foreach (var t in terms) result = result is null ? t : Add(result, t);
+        }
+        return result ?? Zero;
+    }
+}
+
+/// <summary>
+/// (EN) Rule for ∫ (P·x²+Q)/(x⁴+a·x²+b) dx (even numerator), for b &gt; 0 and 2√b &gt; a, where the
+///      denominator factors over the reals as (x²+p·x+q)(x²-p·x+q) with q = √b, p = √(2q-a).
+/// (ZH) ∫ (P·x²+Q)/(x⁴+a·x²+b) dx（偶分子）的规则，条件为 b &gt; 0 且 2√b &gt; a，此时分母在实数上
+///      分解为 (x²+p·x+q)(x²-p·x+q)，其中 q = √b，p = √(2q-a)。
+/// </summary>
+public sealed record BiquadraticRule : AtomicRule
+{
+    /// <summary>(EN) Coefficient a of x² (denominator x⁴+a·x²+b, normalized to leading x⁴). (ZH) x² 的系数 a。</summary>
+    public required Expression A { get; init; }
+    /// <summary>(EN) Constant term b. (ZH) 常数项 b。</summary>
+    public required Expression B { get; init; }
+    /// <summary>(EN) Coefficient P of x² in the numerator. (ZH) 分子中 x² 的系数 P。</summary>
+    public required Expression P { get; init; }
+    /// <summary>(EN) Constant term Q of the numerator. (ZH) 分子常数项 Q。</summary>
+    public required Expression Q { get; init; }
+    /// <summary>(EN) Leading coefficient of the original denominator (result is scaled by its reciprocal). (ZH) 原分母的首项系数（结果乘其倒数）。</summary>
+    public required Expression Leading { get; init; }
+
+    /// <summary>(EN) Evaluates the closed form via partial fractions over the real conjugate quadratics. (ZH) 通过对实共轭二次因子做部分分式求闭式。</summary>
+    public override Expression Eval()
+    {
+        var x = Variable;
+        var q = Sqrt(B);
+        var p = Sqrt(Subtract(Multiply(Two, q), A));
+
+        var denPlus = Add(Add(x * x, Multiply(p, x)), q);
+        var denMinus = Add(Subtract(x * x, Multiply(p, x)), q);
+        // (EN) (Mx+N)/(x²+px+q) + (-Mx+N)/(x²-px+q) with M=(Q/q-P)/(2p), N=Q/(2q). (ZH) 同左。
+        var n = Divide(Q, Multiply(Two, q));
+        var m = Divide(Subtract(Divide(Q, q), P), Multiply(Two, p));
+
+        var disc = Sqrt(Subtract(Multiply(4, q), p * p)); // √(4q-p²)
+
+        var logPlus = Multiply(Divide(m, Two), Ln(denPlus));
+        var logMinus = Negate(Multiply(Divide(m, Two), Ln(denMinus)));
+        // (EN) Remaining linear term is (N - M·p/2)·∫dx/(quadratic) for both factors. (ZH) 剩余一次项对两个因子都是 (N - M·p/2)·∫dx/(二次式)。
+        var rem = Subtract(n, Divide(Multiply(m, p), Two));
+        var atanPlus = Multiply(rem,
+            Multiply(Divide(Two, disc), Atan(Divide(Add(Multiply(Two, x), p), disc))));
+        var atanMinus = Multiply(rem,
+            Multiply(Divide(Two, disc), Atan(Divide(Subtract(Multiply(Two, x), p), disc))));
+
+        var result = Add(Add(logPlus, logMinus), Add(atanPlus, atanMinus));
+        return Expression.IsOne(Leading) ? result : Divide(result, Leading);
+    }
 }

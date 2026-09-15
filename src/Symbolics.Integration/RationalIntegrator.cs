@@ -387,14 +387,19 @@ internal static class RationalIntegrator
     private static List<Rational>? FindQuadraticFactor(IReadOnlyList<Rational> poly)
     {
         if (Polynomial.Degree(poly) < 2) return null;
-        for (int b = -12; b <= 12; b++)
-            for (int c = -12; c <= 12; c++)
-            {
-                var q = new List<Rational> { (Rational)c, (Rational)b, Rational.One };
-                if (!IsIrreducibleQuadratic(q)) continue;
-                var (_, r) = Polynomial.Divide(poly, q);
-                if (Polynomial.Degree(r) < 0) return q;
-            }
+        // (EN) Search monic irreducible quadratics x²+bx+c with small rational b,c (denominators up to 6),
+        //      so denominators like (3+2x²)² = 2²(x²+3/2)² are handled.
+        // (ZH) 搜索小有理系数（分母至多 6）的首一不可约二次式 x²+bx+c，以处理 (3+2x²)² = 2²(x²+3/2)² 之类。
+        for (int bd = 1; bd <= 6; bd++)
+            for (int bn = -24; bn <= 24; bn++)
+                for (int cd = 1; cd <= 6; cd++)
+                    for (int cn = -24; cn <= 24; cn++)
+                    {
+                        var q = new List<Rational> { new Rational(cn, cd), new Rational(bn, bd), Rational.One };
+                        if (!IsIrreducibleQuadratic(q)) continue;
+                        var (_, r) = Polynomial.Divide(poly, q);
+                        if (Polynomial.Degree(r) < 0) return q;
+                    }
         return null;
     }
 

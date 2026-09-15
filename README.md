@@ -98,6 +98,10 @@ IntegrationRule steps = Integrate.Steps(x*Cos(x), x);
 | **Chebyshev substitution** | Binomial differentials `c·x^m·(a+b·x^n)^p` (p, (m+1)/n, or (m+1)/n+p integer) |
 | **√-quadratic denom** | `∫(p·x+q)/√(a+b·x+c·x²) dx` |
 | **Distributions** | `∫δ⁽ⁿ⁾(a+b·x) dx` (= Heaviside/δ), `∫Heaviside(m·x+b)·g(x) dx` |
+| **Normalization** | Fractional powers combine (`x^½·x^⅓ = x^⅚`), exponentials combine (`e^a·e^b = e^(a+b)`), nested affine powers `((a+bx)^d)^e` |
+| **Generalized erf** | `∫e^(a·x²+b·x+c) dx` (erf for a&lt;0, erfi for a&gt;0) |
+| **P(x)·√(quad)** | `∫P(x)·√(a+b·x+c·x²) dx` via reduction; `√(x+√x)` etc. |
+| **Biquadratic** | `∫(P·x²+Q)/(x⁴+a·x²+b) dx` (conjugate irrational quadratic factors, e.g. `1/(x⁴+1)`) |
 | **Inverse secant** | `∫asec(x) dx`, `∫acsc(x) dx` |
 | **Trig product-to-sum** | `sin(A)cos(B)`, `sin(A)sin(B)`, `cos(A)cos(B)` with different linear arguments |
 | **Cyclic parts** | `∫e^(ax)·sin(bx) dx`, `∫e^(ax)·cos(bx) dx` |
@@ -145,7 +149,7 @@ src/
       Structure.cs            — Tree traversal utilities
       Algebraic.cs            — Summand/Factor decomposition
   Symbolics.Integration.Tests/
-    Program.cs                — 140 integration tests
+    Program.cs                — 149 integration tests
 ```
 
 ## Build
