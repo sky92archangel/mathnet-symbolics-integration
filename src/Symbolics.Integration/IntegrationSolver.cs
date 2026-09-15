@@ -131,6 +131,14 @@ internal class IntegrationSolver
         rule = MatchConstantTimesRule(integrand, variable);
         if (rule is not null && !rule.ContainsDontKnow) return rule;
 
+        // (EN) 3b. Integer powers/products of trig & hyperbolic functions. (ZH) 3b. 三角与双曲函数的整数次幂/乘积。
+        rule = TryTrigPowersRule(integrand, variable);
+        if (rule is not null) return rule;
+
+        // (EN) 3c. Expand polynomials/products of sums, then integrate term by term. (ZH) 3c. 展开多项式/和式的乘积，再逐项积分。
+        rule = TryExpandRule(integrand, variable);
+        if (rule is not null && !rule.ContainsDontKnow) return rule;
+
         // (EN) 4. Substitution (u-sub): f(g(x))*g'(x). (ZH) 4. 换元积分：f(g(x))*g'(x)。
         rule = TrySubstitutionRule(integrand, variable);
         if (rule is not null && !rule.ContainsDontKnow) return rule;
@@ -284,7 +292,7 @@ internal class IntegrationSolver
                     rule = new ArctanRule
                     {
                         Integrand = integrand, Variable = variable,
-                        A = a, B = bCoeff, Sign = 1
+                        A = a, B = bCoeff
                     };
                     return true;
                 }
@@ -1090,6 +1098,249 @@ internal class IntegrationSolver
     // (ZH) 尝试换元积分：f(g(x))*g'(x) dx → ∫ f(u) du。
 
     /// <summary>
+    /// (EN) Integrate integer powers/products of trig &amp; hyperbolic functions via the closed-form
+    ///      routines in <see cref="TrigIntegrals"/>.
+    /// (ZH) 借助 <see cref="TrigIntegrals"/> 中的闭式例程积分三角与双曲函数的整数次幂/乘积。
+    /// </summary>
+    private static IntegrationRule? TryTrigPowersRule(Expression integrand, Expression variable)
+    {
+        if (TrigIntegrals.TryIntegrate(integrand, variable, out var result))
+            return new TrigPowerRule { Integrand = integrand, Variable = variable, Result = result };
+        return null;
+    }
+
+    // ── Polynomial expansion rewrite ─────────────────────────────
+    // (EN) Expand a non-negative integer power of a sum, or a product containing sums, into a
+    //     polynomial that the additive rule can integrate term by term.
+    // (ZH) 将和式的非负整数次幂、或含和式的乘积展开为多项式，再由加法规则逐项积分。
+
+    /// <summary>
+    /// (EN) Try expanding the integrand and integrating the expanded polynomial.
+    /// (ZH) 尝试展开被积式并对展开后的多项式积分。
+    /// </summary>
+    private IntegrationRule? TryExpandRule(Expression integrand, Expression variable)
+    {
+        if (!IsExpandable(integrand)) return null;
+
+        var expanded = ExpandFully(integrand, maxNodes: MaxIntegrandNodes);
+        if (expanded is null || expanded.Equals(integrand)) return null;
+
+        // (EN) Combine like terms so the result is a clean polynomial. (ZH) 合并同类项，使结果为整洁的多项式。
+        expanded = CollectLikeTerms(expanded, variable);
+
+        var substep = Solve(expanded, variable);
+        if (substep.ContainsDontKnow) return null;
+
+        return new RewriteRule
+        {
+            Integrand = integrand, Variable = variable,
+            Rewritten = expanded, Substeps = substep
+        };
+    }
+
+    /// <summary>
+    /// (EN) Whether the expression is worth expanding: a square-or-higher power of a sum, or a
+    ///      product that contains a sum.
+    /// (ZH) 表达式是否值得展开：和式的二次或更高次幂，或含和式的乘积。
+    /// </summary>
+    private static bool IsExpandable(Expression e) => e switch
+    {
+        Expression.Power p when p.Base is Expression.Sum && p.Exponent is Expression.Number { Value: var r }
+            && r.IsInteger && r.ToInt32() >= 2 => true,
+        Expression.Product prod => prod.Factors.Any(f => f is Expression.Sum),
+        _ => false,
+    };
+
+    /// <summary>
+    /// (EN) Collects like terms of a polynomial: each term is split into a variable-free coefficient
+    ///      and a monomial (product of the variable-dependent factors); equal monomials are merged.
+    /// (ZH) 合并多项式的同类项：将每一项拆为与变量无关的系数和单项式（含变量因子的乘积）；相同单项式合并。
+    /// </summary>
+    private static Expression CollectLikeTerms(Expression sum, Expression variable)
+    {
+        var groups = new Dictionary<Expression, Expression>();
+        var order = new List<Expression>();
+        foreach (var term in FlattenSum(sum))
+        {
+            Expression coeff = One;
+            var monoFactors = new List<Expression>();
+            foreach (var f in AllFactors(term))
+            {
+                if (Structure.ContainsVariable(f, variable)) monoFactors.Add(f);
+                else coeff = Multiply(coeff, f);
+            }
+
+            Expression mono = One;
+            foreach (var mf in monoFactors) mono = Multiply(mono, mf);
+
+            if (groups.TryGetValue(mono, out var existing))
+                groups[mono] = Add(existing, coeff);
+            else
+            {
+                groups[mono] = coeff;
+                order.Add(mono);
+            }
+        }
+
+        Expression? result = null;
+        foreach (var mono in order)
+        {
+            var coeff = groups[mono];
+            if (Expression.IsZero(coeff)) continue;
+            var termExpr = Expression.IsOne(mono) ? coeff : Multiply(coeff, mono);
+            result = result is null ? termExpr : Add(result, termExpr);
+        }
+        return result ?? Zero;
+    }
+
+    /// <summary>
+    /// (EN) Enumerates the additive terms of an expression, recursively flattening nested sums.
+    /// (ZH) 枚举表达式的加法项，并递归展平嵌套和式。
+    /// </summary>
+    private static IEnumerable<Expression> FlattenSum(Expression e)
+    {
+        if (e is Expression.Sum s)
+        {
+            foreach (var t in s.Terms)
+                foreach (var u in FlattenSum(t))
+                    yield return u;
+        }
+        else
+        {
+            yield return e;
+        }
+    }
+
+    /// <summary>
+    /// (EN) Enumerates the multiplicative factors of an expression, recursively flattening nested
+    ///      products. (ZH) 枚举表达式的乘法因式，并递归展平嵌套乘积。
+    /// </summary>
+    private static IEnumerable<Expression> AllFactors(Expression e)
+    {
+        if (e is Expression.Product p)
+        {
+            foreach (var f in p.Factors)
+                foreach (var u in AllFactors(f))
+                    yield return u;
+        }
+        else
+        {
+            yield return e;
+        }
+    }
+
+    /// <summary>
+    /// (EN) Repeatedly expands products of sums until a fixed point, bailing out if the expression
+    ///      would exceed <paramref name="maxNodes"/> nodes.
+    /// (ZH) 反复展开和式的乘积直至不动点；若表达式将超过 <paramref name="maxNodes"/> 个节点则放弃。
+    /// </summary>
+    private static Expression? ExpandFully(Expression e, int maxNodes)
+    {
+        var cur = e;
+        for (int iter = 0; iter < 64; iter++)
+        {
+            var next = ExpandOnce(cur);
+            if (next is null) return null;
+            if (next.Equals(cur)) return cur;
+            if (Structure.CountOperators(next) > maxNodes) return null;
+            cur = next;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// (EN) One expansion pass: distributes the first sum found in a product and turns a square (or
+    ///      higher power) of a sum into a product of copies so the next pass can distribute it.
+    /// (ZH) 一次展开：对乘积中遇到的第一个和式做分配律，并把和式的二次（或更高）幂改写为若干副本的
+    ///      乘积，供下一次展开。
+    /// </summary>
+    private static Expression? ExpandOnce(Expression e)
+    {
+        switch (e)
+        {
+            case Expression.Sum sum:
+                var newTerms = new List<Expression>(sum.Terms.Count);
+                foreach (var t in sum.Terms)
+                {
+                    var et = ExpandOnce(t);
+                    if (et is null) return null;
+                    // (EN) Flatten nested sums so expansion reaches a fixed point. (ZH) 展平嵌套和式，使展开达到不动点。
+                    if (et is Expression.Sum nested) newTerms.AddRange(nested.Terms);
+                    else newTerms.Add(et);
+                }
+                return new Expression.Sum(newTerms);
+
+            case Expression.Product prod:
+                {
+                    // (EN) Expand factors first and flatten nested products so terms are products of
+                    //      atomic factors (needed for like-term collection).
+                    // (ZH) 先展开各因式并展平嵌套乘积，使各项为原子因式的乘积（合并同类项所需）。
+                    var expandedFactors = new List<Expression>(prod.Factors.Count);
+                    foreach (var f in prod.Factors)
+                    {
+                        var ef = ExpandOnce(f);
+                        if (ef is null) return null;
+                        if (ef is Expression.Product ep) expandedFactors.AddRange(ep.Factors);
+                        else expandedFactors.Add(ef);
+                    }
+
+                    int idx = -1;
+                    for (int i = 0; i < expandedFactors.Count; i++)
+                        if (expandedFactors[i] is Expression.Sum) { idx = i; break; }
+
+                    if (idx < 0)
+                        return new Expression.Product(expandedFactors);
+
+                    var theSum = (Expression.Sum)expandedFactors[idx];
+                    var others = expandedFactors.Where((_, i) => i != idx).ToList();
+                    var terms = new List<Expression>(theSum.Terms.Count);
+                    foreach (var t in theSum.Terms)
+                        terms.Add(new Expression.Product(others.Append(t).ToList()));
+                    return new Expression.Sum(terms);
+                }
+
+            case Expression.Power p when p.Base is Expression.Sum
+                && p.Exponent is Expression.Number { Value: var r } && r.IsInteger && r.ToInt32() >= 2:
+                {
+                    // (EN) Rewrite (sum)^n as n copies (pairwise squaring to limit growth). (ZH) 将 (sum)^n 改写为 n 个副本（两两平方以抑制膨胀）。
+                    int n = r.ToInt32();
+                    var copies = new List<Expression>();
+                    int remaining = n;
+                    while (remaining > 0)
+                    {
+                        int take = Math.Min(remaining, 2);
+                        var pair = new Expression.Product(Enumerable.Repeat(p.Base, take).ToList());
+                        copies.Add(pair);
+                        remaining -= take;
+                    }
+                    return copies.Count == 1 ? copies[0] : new Expression.Product(copies);
+                }
+
+            case Expression.Function fn:
+                {
+                    var arg = ExpandOnce(fn.Argument);
+                    if (arg is null) return null;
+                    return new Expression.Function(fn.Op, arg);
+                }
+
+            case Expression.FunctionN fnN:
+                {
+                    var args = new List<Expression>(fnN.Arguments.Count);
+                    foreach (var a in fnN.Arguments)
+                    {
+                        var ea = ExpandOnce(a);
+                        if (ea is null) return null;
+                        args.Add(ea);
+                    }
+                    return new Expression.FunctionN(fnN.Op, args);
+                }
+
+            default:
+                return e;
+        }
+    }
+
+    /// <summary>
     /// (EN) Try u-substitution: find a candidate sub-expression whose derivative appears
     ///      as a factor in the integrand.
     /// (ZH) 尝试换元积分：寻找候选子表达式，其导数以因子形式出现在被积表达式中。
@@ -1287,17 +1538,16 @@ internal class IntegrationSolver
                     };
                 return rule;
             }
-            return new SimpleLogRule
-            {
-                Integrand = integrand, Variable = variable,
-                LinearTerm = baseExpr
-            };
+            // (EN) Not a linear denominator: cannot use the simple log rule. (ZH) 分母不是线性式，不能用简单对数规则。
+            return null;
         }
 
         // (EN) ── Case 3: ∫ 1/(a*x + b)^k dx = (a*x+b)^(1-k)/(a*(1-k)). (ZH) ── 情形 3：∫ 1/(a*x + b)^k dx = (a*x+b)^(1-k)/(a*(1-k))。
         if (expExpr is Expression.Number expN && expN.Value.IsInteger)
         {
-            var a = TryExtractLinearCoeff(baseExpr, variable) ?? One;
+            var a = TryExtractLinearCoeff(baseExpr, variable);
+            // (EN) The power rule requires a linear base; otherwise decline. (ZH) 幂规则要求线性底，否则放弃。
+            if (a is null) return null;
             var rule = new SimplePowerRule
             {
                 Integrand = integrand, Variable = variable,
@@ -1554,11 +1804,14 @@ internal class IntegrationSolver
                 set.Add(fn);
                 // (EN) u = g(x) when it is not just the bare variable (e.g. x² in exp(x²)). (ZH) 当 g(x) 不是裸变量时取 u = g(x)（如 exp(x²) 中的 x²）。
                 if (!fn.Argument.Equals(v)) set.Add(fn.Argument);
+                Walk(fn.Argument);
             }
             if (x is Expression.Power pwr)
             {
                 if (Structure.ContainsVariable(pwr.Base, v) && !pwr.Base.Equals(v)) set.Add(pwr.Base);
                 if (Structure.ContainsVariable(pwr.Exponent, v)) set.Add(pwr.Exponent);
+                Walk(pwr.Base);
+                Walk(pwr.Exponent);
             }
             if (x is Expression.Sum sum) { foreach (var t in sum.Terms) Walk(t); }
             if (x is Expression.Product prod) { foreach (var fact in prod.Factors) Walk(fact); }
@@ -1579,8 +1832,8 @@ internal class IntegrationSolver
     {
         if (integrand.Equals(du)) return (One, One);
 
-        var integrandFactors = Algebraic.Factors(integrand).ToList();
-        var duFactors = Algebraic.Factors(du).ToList();
+        var integrandFactors = ExpandFactors(integrand);
+        var duFactors = ExpandFactors(du);
         Expression coeff = One;
 
         foreach (var df in duFactors)
@@ -1592,21 +1845,39 @@ internal class IntegrationSolver
                 continue;
             }
 
-            var (dfBase, dfCo) = DecomposeConstant(df);
+            var (dBase, dExp) = AsPower(df);
             int match = -1;
+            Expression? replacement = null;
             for (int i = 0; i < integrandFactors.Count; i++)
             {
                 if (!Structure.ContainsVariable(integrandFactors[i], variable)) continue;
-                var (fBase, fCo) = DecomposeConstant(integrandFactors[i]);
-                if (fBase.Equals(dfBase))
+                var (fBase, fExp) = AsPower(integrandFactors[i]);
+                if (!dBase.Equals(fBase)) continue;
+
+                // (EN) Cancel the derivative's exponent against the integrand factor's exponent,
+                //      splitting the latter when it is a higher power (e.g. x³ against x).
+                // (ZH) 用被积因式的指数抵消导数的指数；当被积因式是更高次幂时将其拆分（如 x³ 对 x）。
+                if (fExp is Expression.Number fe && dExp is Expression.Number de
+                    && fe.Value.IsInteger && de.Value.IsInteger)
                 {
-                    match = i;
-                    coeff = Multiply(coeff, Divide(fCo, dfCo));
-                    break;
+                    var diff = Subtract(fe, de);
+                    if (diff is Expression.Number dn)
+                    {
+                        if (dn.Value.IsNegative) return null;
+                        replacement = dn.Value.IsZero ? null
+                            : (dn.Value.IsOne ? fBase : Pow(fBase, dn));
+                        match = i;
+                        break;
+                    }
                 }
+                // (EN) Non-numeric exponents must match exactly to be cancelled. (ZH) 非数值指数须完全相等才能相消。
+                if (fExp.Equals(dExp)) { replacement = null; match = i; break; }
+                return null;
             }
+
             if (match < 0) return null;
-            integrandFactors.RemoveAt(match);
+            if (replacement is null) integrandFactors.RemoveAt(match);
+            else integrandFactors[match] = replacement;
         }
 
         var remaining = integrandFactors.Count == 0 ? One
@@ -1616,26 +1887,29 @@ internal class IntegrationSolver
     }
 
     /// <summary>
-    /// (EN) If expr is coeff * something, return (something, coeff). Otherwise return expr with coeff=1.
-    /// (ZH) 若表达式为 coeff * something，返回 (something, coeff)；否则返回 (expr, 1)。
+    /// (EN) Splits an expression into (base, exponent): a Power yields its parts, anything else is
+    ///      treated as a first power.
+    /// (ZH) 将表达式拆成 (底, 指数)：幂返回其底与指数，其它表达式视为一次幂。
     /// </summary>
-    private static (Expression Base, Expression Coeff) DecomposeConstant(Expression expr)
+    private static (Expression Base, Expression Exp) AsPower(Expression e) =>
+        e is Expression.Power p ? (p.Base, p.Exponent) : (e, One);
+
+    /// <summary>
+    /// (EN) Lists the multiplicative factors of an expression, distributing an integer power over a
+    ///      product base first: 1/(x·ln x) → [x⁻¹, ln(x)⁻¹]. This lets a derivative factor cancel
+    ///      against a factor hidden inside a reciprocal.
+    /// (ZH) 列出表达式的乘法因式；先对乘积底数分配整数次幂：1/(x·ln x) → [x⁻¹, ln(x)⁻¹]。这样导数因式
+    ///      才能与隐藏在倒数内部的因式相消。
+    /// </summary>
+    private static List<Expression> ExpandFactors(Expression e)
     {
-        if (expr is Expression.Product prod)
+        if (e is Expression.Power p && p.Base is Expression.Product bp
+            && p.Exponent is Expression.Number ne && ne.Value.IsInteger
+            && bp.Factors.Count >= 2)
         {
-            Expression? c = null;
-            Expression? base_ = null;
-            foreach (var f in prod.Factors)
-            {
-                if (f is Expression.Number n)
-                    c = c is null ? n : (Expression)(c * n);
-                else if (base_ is null)
-                    base_ = f;
-            }
-            if (c is not null && base_ is not null)
-                return (base_, c);
+            return bp.Factors.Select(f => Pow(f, p.Exponent)).ToList();
         }
-        return (expr, One);
+        return Algebraic.Factors(e).ToList();
     }
 
     // ── Linear argument helpers ──

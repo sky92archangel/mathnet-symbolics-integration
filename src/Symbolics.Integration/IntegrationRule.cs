@@ -723,36 +723,53 @@ public sealed record ArctanRule : AtomicRule
     public required Expression B { get; init; }
 
     /// <summary>
-    /// (EN) Sign of the denominator: +1 for a+bx², -1 for a-bx².
-    /// (ZH) 分母符号：a+bx² 取 +1，a-bx² 取 -1。
-    /// </summary>
-    public int Sign { get; init; } = 1;
-
-    /// <summary>
-    /// (EN) For <c>Sign &gt; 0</c> returns atan(x·√(b/a)) / (a·√(b/a)); otherwise returns the
-    /// logarithmic form 1/(2·√(ab))·ln((a + x·√(ab))/(a - x·√(ab))).
-    /// (ZH) 当 <c>Sign &gt; 0</c> 时返回 atan(x·√(b/a)) / (a·√(b/a))；否则返回对数形式
-    /// 1/(2·√(ab))·ln((a + x·√(ab))/(a - x·√(ab)))。
+    /// (EN) Evaluates ∫ 1/(a+b·x²) dx. For numeric a,b the branch is chosen from their signs so the
+    ///      result stays real: an arctangent when a·b &gt; 0, and a logarithm (artanh) when a·b &lt; 0.
+    ///      For symbolic signs it falls back to the arctangent form.
+    /// (ZH) 求 ∫ 1/(a+b·x²) dx。当 a、b 为数值时，根据符号选择分支以保证结果为实数：a·b &gt; 0 用反正切，
+    ///      a·b &lt; 0 用对数（artanh）；符号未知时退化为反正切形式。
     /// </summary>
     public override Expression Eval()
     {
         var x = Variable;
-        // (EN) ∫ sign/(a + b*x^2) dx, where sign = ±1. (ZH) ∫ sign/(a + b*x^2) dx，其中 sign = ±1。
-        // (EN) = sign/(a*sqrt(b/a)) * atan(x*sqrt(b/a))  when a,b > 0. (ZH) = sign/(a*sqrt(b/a)) * atan(x*sqrt(b/a))，当 a,b > 0 时。
-        if (Sign > 0)
+
+        // (EN) Numeric signs let us pick a real-valued branch. (ZH) 数值符号使我们能选择实值分支。
+        if (A is Expression.Number an && B is Expression.Number bn)
         {
-            var sqrtBA = Sqrt(Divide(B, A));
-            return Divide(One, Multiply(A, sqrtBA)) * Atan(Multiply(sqrtBA, x));
+            // (EN) Use the numeric absolute values so the result contains no symbolic Abs nodes.
+            // (ZH) 使用数值绝对值，使结果不含符号 Abs 节点。
+            var p = AbsOf(A);               // (EN) |a|. (ZH) |a|。
+            var q = AbsOf(B);               // (EN) |b|. (ZH) |b|。
+            var sqrtPQ = Sqrt(Multiply(p, q));
+            bool sameSign = an.Value.IsNegative == bn.Value.IsNegative;
+
+            if (sameSign)
+            {
+                // (EN) ∫ dx/(a+bx²) = s/√(|a||b|)·atan(x·√(|b|/|a|)), with s = sign(a). (ZH) ∫ dx/(a+bx²) = s/√(|a||b|)·atan(x·√(|b|/|a|))，s = sign(a)。
+                var body = Multiply(Divide(One, sqrtPQ),
+                    Atan(Multiply(x, Sqrt(Divide(q, p)))));
+                return an.Value.IsNegative ? Negate(body) : body;
+            }
+
+            // (EN) ∫ dx/(a+bx²) = s/(2√(|a||b|))·ln((√|a|+x√|b|)/(√|a|-x√|b|)). (ZH) ∫ dx/(a+bx²) = s/(2√(|a||b|))·ln((√|a|+x√|b|)/(√|a|-x√|b|))。
+            var sp = Sqrt(p);
+            var sq = Sqrt(q);
+            var ratio = Divide(Add(sp, Multiply(x, sq)), Subtract(sp, Multiply(x, sq)));
+            var logBody = Multiply(Divide(One, Multiply(Two, sqrtPQ)), Ln(ratio));
+            return an.Value.IsNegative ? Negate(logBody) : logBody;
         }
-        else
-        {
-            // (EN) ∫ 1/(a - b*x^2) dx = 1/(2*a*sqrt(b/a)) * ln|(a + x*sqrt(a*b))/(a - x*sqrt(a*b))|.
-            // (ZH) ∫ 1/(a - b*x^2) dx = 1/(2*a*sqrt(b/a)) * ln|(a + x*sqrt(a*b))/(a - x*sqrt(a*b))|。
-            var sqrtAB = Sqrt(Multiply(A, B));
-            var inner = Divide(A + sqrtAB * x, A - sqrtAB * x);
-            return Divide(One, Multiply(Two, sqrtAB)) * Ln(inner);
-        }
+
+        // (EN) Symbolic fallback: use the arctangent form. (ZH) 符号未知时回退：使用反正切形式。
+        var sqrtBA = Sqrt(Divide(B, A));
+        return Divide(One, Multiply(A, sqrtBA)) * Atan(Multiply(sqrtBA, x));
     }
+
+    /// <summary>
+    /// (EN) Absolute value that folds a numeric argument exactly, otherwise keeps the Abs node.
+    /// (ZH) 对数值参数精确折叠的绝对值，否则保留 Abs 节点。
+    /// </summary>
+    private static Expression AbsOf(Expression e) =>
+        e is Expression.Number n ? new Expression.Number(Rational.Abs(n.Value)) : Abs(e);
 }
 
 /// <summary>
@@ -794,6 +811,28 @@ public sealed record NestedPowRule : AtomicRule
             return Ln(BaseVal);
         return Pow(BaseVal, n + One) / (n + One);
     }
+}
+
+/// <summary>
+/// (EN) Rule for integer powers/products of trig and hyperbolic functions (sin^m·cos^n,
+///      tan^m·sec^n, sinh^m·cosh^n, ...); the antiderivative is computed once by
+///      <c>TrigIntegrals</c> and stored in <c>Result</c>.
+/// (ZH) 三角与双曲函数整数次幂/乘积（sin^m·cos^n、tan^m·sec^n、sinh^m·cosh^n 等）的规则；原函数由
+///      <c>TrigIntegrals</c> 计算一次并存入 <c>Result</c>。
+/// </summary>
+public sealed record TrigPowerRule : AtomicRule
+{
+    /// <summary>
+    /// (EN) The precomputed antiderivative of the integrand.
+    /// (ZH) 预先计算的被积函数原函数。
+    /// </summary>
+    public required Expression Result { get; init; }
+
+    /// <summary>
+    /// (EN) Returns the stored antiderivative.
+    /// (ZH) 返回已存储的原函数。
+    /// </summary>
+    public override Expression Eval() => Result;
 }
 
 /// <summary>

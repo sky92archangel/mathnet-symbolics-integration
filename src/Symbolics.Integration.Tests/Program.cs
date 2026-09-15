@@ -741,6 +741,242 @@ Run("EllipticE: √(2 - sin²(x))", () => {
     Assert(r != null);
 });
 
+// ── Extended coverage: general differentiation, parts on single functions, trig powers ──
+// (EN) These cases exercise the general differentiator, integration by parts of a single
+//      non-polynomial function, and the trig/hyperbolic power integrator.
+// (ZH) 这些用例检验通用微分器、单个非多项式函数的分部积分，以及三角/双曲幂积分器。
+
+// (EN) ∫ ln(x) dx = x·ln(x) - x — parts with dv = dx.
+// (ZH) ∫ ln(x) dx = x·ln(x) - x —— 取 dv = dx 的分部积分。
+Run("ln(x) (parts, dv=dx)", () => {
+    var x = Symbol("x");
+    var r = Integrate.Of(Ln(x), x);
+    Console.WriteLine($"    ∫ ln(x) dx = {r}");
+    Assert(!Integrate.Steps(Ln(x), x).ContainsDontKnow);
+});
+
+// (EN) ∫ asin(x) dx = x·asin(x) + √(1-x²) — parts plus a substitution.
+// (ZH) ∫ asin(x) dx = x·asin(x) + √(1-x²) —— 分部积分加换元。
+Run("asin(x)", () => {
+    var x = Symbol("x");
+    var r = Integrate.Of(Asin(x), x);
+    Console.WriteLine($"    ∫ asin(x) dx = {r}");
+    Assert(!Integrate.Steps(Asin(x), x).ContainsDontKnow);
+});
+
+// (EN) ∫ atan(x) dx = x·atan(x) - ln(1+x²)/2 — parts plus a substitution.
+// (ZH) ∫ atan(x) dx = x·atan(x) - ln(1+x²)/2 —— 分部积分加换元。
+Run("atan(x)", () => {
+    var x = Symbol("x");
+    var r = Integrate.Of(Atan(x), x);
+    Console.WriteLine($"    ∫ atan(x) dx = {r}");
+    Assert(!Integrate.Steps(Atan(x), x).ContainsDontKnow);
+});
+
+// (EN) ∫ erf(x) dx = x·erf(x) + e^(-x²)/√π — parts; exercises the erf derivative.
+// (ZH) ∫ erf(x) dx = x·erf(x) + e^(-x²)/√π —— 分部积分，检验 erf 的导数。
+Run("erf(x)", () => {
+    var x = Symbol("x");
+    var erf = new Expression.Function(FunctionType.Erf, x);
+    var r = Integrate.Of(erf, x);
+    Console.WriteLine($"    ∫ erf(x) dx = {r}");
+    Assert(!Integrate.Steps(erf, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x·√(x²+1) dx = (x²+1)^(3/2)/3 — needs the general power/generalized diff.
+// (ZH) ∫ x·√(x²+1) dx = (x²+1)^(3/2)/3 —— 需要通用微分支持。
+Run("x*sqrt(x^2+1) (u-sub)", () => {
+    var x = Symbol("x");
+    var expr = x * Sqrt(x*x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x·√(x²+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(x·ln x) dx = ln(ln x) — reciprocal-of-product factoring in substitution.
+// (ZH) ∫ 1/(x·ln x) dx = ln(ln x) —— 换元中对乘积倒数进行因式分解。
+Run("1/(x*ln(x)) (u-sub)", () => {
+    var x = Symbol("x");
+    var expr = 1 / (x * Ln(x));
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x·ln x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ x³·e^(x²) dx — substitution u = x² followed by parts, needs exponent splitting.
+// (ZH) ∫ x³·e^(x²) dx —— 令 u = x² 换元后再分部积分，需要指数拆分。
+Run("x^3*exp(x^2) (u-sub + parts)", () => {
+    var x = Symbol("x");
+    var expr = x*x*x * Exp(x*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ x³·e^(x²) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ 1/(x²-1) dx — opposite-sign quadratic denominator gives a real logarithm.
+// (ZH) ∫ 1/(x²-1) dx —— 二次分母符号相反，得到实对数。
+Run("1/(x^2-1) real log", () => {
+    var x = Symbol("x");
+    var expr = 1 / (x*x - 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ 1/(x²-1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ atan(x)/(1+x²) dx = atan(x)²/2 — substitution u = atan(x).
+// (ZH) ∫ atan(x)/(1+x²) dx = atan(x)²/2 —— 令 u = atan(x) 换元。
+Run("atan(x)/(1+x^2) (u-sub)", () => {
+    var x = Symbol("x");
+    var expr = Atan(x) / (1 + x*x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ atan(x)/(1+x²) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sin²(x) dx = x/2 - sin(2x)/4 — trig power (even exponent).
+// (ZH) ∫ sin²(x) dx —— 三角幂（偶次）。
+Run("sin(x)^2", () => {
+    var x = Symbol("x");
+    var expr = Sin(x) * Sin(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ sin²(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sin³(x) dx = cos³(x)/3 - cos(x) — trig power (odd exponent).
+// (ZH) ∫ sin³(x) dx —— 三角幂（奇次）。
+Run("sin(x)^3", () => {
+    var x = Symbol("x");
+    var expr = Sin(x) * Sin(x) * Sin(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ sin³(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sin²(x)·cos³(x) dx — mixed odd/even trig powers.
+// (ZH) ∫ sin²(x)·cos³(x) dx —— 奇偶混合的三角幂。
+Run("sin(x)^2*cos(x)^3", () => {
+    var x = Symbol("x");
+    var expr = Sin(x)*Sin(x) * Cos(x)*Cos(x)*Cos(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ sin²(x)·cos³(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ tan²(x) dx = tan(x) - x — tan power reduction.
+// (ZH) ∫ tan²(x) dx = tan(x) - x —— 正切幂递推。
+Run("tan(x)^2 = tan(x)-x", () => {
+    var x = Symbol("x");
+    var expr = Tan(x) * Tan(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ tan²(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sec³(x) dx — secant power reduction.
+// (ZH) ∫ sec³(x) dx —— 正割幂递推。
+Run("sec(x)^3", () => {
+    var x = Symbol("x");
+    var expr = Sec(x)*Sec(x)*Sec(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ sec³(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ tan³(x)·sec(x) dx = sec³(x)/3 - sec(x) — odd tan power via u = sec.
+// (ZH) ∫ tan³(x)·sec(x) dx = sec³(x)/3 - sec(x) —— 奇次正切用 u = sec。
+Run("tan(x)^3*sec(x)", () => {
+    var x = Symbol("x");
+    var expr = Tan(x)*Tan(x)*Tan(x) * Sec(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ tan³(x)·sec(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sinh²(x) dx = sinh(x)cosh(x)/2 - x/2 — hyperbolic even power.
+// (ZH) ∫ sinh²(x) dx —— 双曲偶次幂。
+Run("sinh(x)^2", () => {
+    var x = Symbol("x");
+    var expr = Sinh(x) * Sinh(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ sinh²(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ cosh³(x) dx = sinh(x) + sinh³(x)/3 — hyperbolic odd power.
+// (ZH) ∫ cosh³(x) dx = sinh(x) + sinh³(x)/3 —— 双曲奇次幂。
+Run("cosh(x)^3", () => {
+    var x = Symbol("x");
+    var expr = Cosh(x)*Cosh(x)*Cosh(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ cosh³(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ tanh²(x) dx = x - tanh(x) — hyperbolic tan power.
+// (ZH) ∫ tanh²(x) dx = x - tanh(x) —— 双曲正切幂。
+Run("tanh(x)^2 = x - tanh(x)", () => {
+    var x = Symbol("x");
+    var expr = Tanh(x) * Tanh(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ tanh²(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫ sech²(x) dx = tanh(x) — sech power.
+// (ZH) ∫ sech²(x) dx = tanh(x) —— 双曲正割幂。
+Run("sech(x)^2 = tanh(x)", () => {
+    var x = Symbol("x");
+    var expr = Sech(x) * Sech(x);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ sech²(x) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// ── Polynomial expansion rewrite ──
+// (EN) Tests for expanding powers/products of sums before integrating.
+// (ZH) 先展开和式的幂/乘积再积分的测试。
+
+// (EN) ∫(x²+3)² dx = x⁵/5 + 2x³ + 9x — expand a squared sum.
+// (ZH) ∫(x²+3)² dx = x⁵/5 + 2x³ + 9x —— 展开平方和式。
+Run("(x^2+3)^2 (expand)", () => {
+    var x = Symbol("x");
+    var expr = (x*x + 3) * (x*x + 3);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (x²+3)² dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫(x+1)³ dx — expand a cubed sum and collect like terms.
+// (ZH) ∫(x+1)³ dx —— 展开三次和式并合并同类项。
+Run("(x+1)^3 (expand)", () => {
+    var x = Symbol("x");
+    var expr = (x + 1)*(x + 1)*(x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (x+1)³ dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫(x+1)(x+2) dx — expand a product of sums.
+// (ZH) ∫(x+1)(x+2) dx —— 展开和式的乘积。
+Run("(x+1)*(x+2) (expand)", () => {
+    var x = Symbol("x");
+    var expr = (x + 1)*(x + 2);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (x+1)(x+2) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
+// (EN) ∫(x+1)/(x²+1) dx = atan(x) + ln(1+x²)/2 — expand then integrate each part.
+// (ZH) ∫(x+1)/(x²+1) dx = atan(x) + ln(1+x²)/2 —— 展开后分别积分。
+Run("(x+1)/(x^2+1) (expand)", () => {
+    var x = Symbol("x");
+    var expr = (x + 1) / (x*x + 1);
+    var r = Integrate.Of(expr, x);
+    Console.WriteLine($"    ∫ (x+1)/(x²+1) dx = {r}");
+    Assert(!Integrate.Steps(expr, x).ContainsDontKnow);
+});
+
 Console.WriteLine($"\n=== Result: {passed} passed, {failed} failed ===");
 
 // (EN) Minimal assertion helper: throws when the condition is false so that the

@@ -80,9 +80,12 @@ IntegrationRule steps = Integrate.Steps(x*Cos(x), x);
 | **Hyperbolic** | sinh, cosh, tanh, coth, sech, csch |
 | **Inverse trig** | asin, acos, atan |
 | **Inverse hyp** | asinh, acosh, atanh |
-| **Strategy** | Sum, Constant×, u-substitution, Parts, CyclicParts |
+| **Strategy** | Sum, Constant×, general u-substitution, Parts (incl. single functions), CyclicParts |
+| **Differentiation** | General differentiator (sum/product/chain rule + elementary/special-function table) |
 | **Linear args** | `f(ax+b)` automatic detection |
-| **Quadratic sqrt** | `1/√(ax²+bx+c)`, `√(ax²+bx+c)`, `1/(a+bx²)` |
+| **Quadratic sqrt** | `1/√(ax²+bx+c)`, `√(ax²+bx+c)`, `1/(a+bx²)` (real branch for opposite-sign denominators) |
+| **Trig/hyp powers** | `sin^m cos^n`, `tan^m sec^n`, `cot^m csc^n`, `sinh^m cosh^n`, `tanh^m sech^n`, `coth^m csch^n` |
+| **Expansion** | `(poly)^n` and products of sums expanded, like terms collected |
 | **Special funcs** | Erf, FresnelS/C, Si, Ci, Shi, Chi, Ei, Li, **Polylog**, **UpperGamma** |
 | **Elliptic** | **EllipticF** (1st kind), **EllipticE** (2nd kind) |
 | **Owens T** | **OwensT** `exp(-(ax+b)²)·erf(y·(ax+b))` |
@@ -111,17 +114,19 @@ Expression Operators.Simplify(Expression expr);
 src/
   Symbolics.Integration/
     Integrate.cs              — Entry point (Of / Steps)
-    IntegrationRule.cs        — Rule hierarchy (~35 rule classes)
+    IntegrationRule.cs        — Rule hierarchy (~40 rule classes)
     IntegrationSolver.cs      — Recursive solver with strategy ordering
+    TrigIntegrals.cs          — Integer powers/products of trig & hyperbolic functions
     Core/
       Expression.cs           — Symbolic expression types + ToString
       Operators.cs            — Arithmetic + Simplify
+      Differentiate.cs        — General symbolic differentiation (chain/product rules)
       FunctionType.cs         — Function enums
       Rational.cs             — Exact rational arithmetic
       Structure.cs            — Tree traversal utilities
       Algebraic.cs            — Summand/Factor decomposition
   Symbolics.Integration.Tests/
-    Program.cs                — 63 integration tests
+    Program.cs                — 92 integration tests
 ```
 
 ## Build

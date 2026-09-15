@@ -517,20 +517,20 @@ public abstract partial record Expression
     }
 
     /// <summary>
-    /// (EN) Renders a product after dropping its leading (negative) numeric factor,
-    ///      used when a sum term is rewritten as a subtraction.
-    /// (ZH) 在去掉开头（负的）数值因子后渲染乘积，用于把和式中的项改写为减法。
+    /// (EN) Renders a product as a subtraction term: the leading negative numeric factor is replaced
+    ///      by its absolute value (so no magnitude is lost) and the remaining factors are appended.
+    /// (ZH) 将乘积渲染为减法项：开头的负数值因子替换为其绝对值（避免丢失系数大小），并追加其余因子。
     /// </summary>
-    /// <param name="p">(EN) The product whose first factor is to be omitted. (ZH) 需要省略首因子的乘积。</param>
-    /// <returns>(EN) The formatted remaining factors. (ZH) 格式化后的剩余因子文本。</returns>
+    /// <param name="p">(EN) The product whose leading sign is rendered separately. (ZH) 首符号单独渲染的乘积。</param>
+    /// <returns>(EN) The formatted product with a positive leading coefficient. (ZH) 首系数为正的格式化乘积。</returns>
     private static string RenderProductWithoutFirstFactor(Product p)
     {
         var rest = p.Factors.Skip(1).ToList();
-        if (rest.Count == 0) return "1";
-        if (rest[0] is Number { Value: var nv })
-            return nv.ToString() + string.Concat(rest.Skip(1).Select(f => "·" + RenderFactor(f, true)));
-        return RenderFactor(rest[0], true) +
-               string.Concat(rest.Skip(1).Select(f => "·" + RenderFactor(f, true)));
+        var absFirst = p.Factors[0] is Number n0
+            ? (-n0.Value).ToString()
+            : RenderFactor(p.Factors[0], true);
+        if (rest.Count == 0) return absFirst;
+        return absFirst + "·" + string.Join("·", rest.Select(f => RenderFactor(f, true)));
     }
 
     // ── Convenience constants ───────────────
